@@ -1,0 +1,18 @@
+[package]
+name = "dnos-ndal"
+version = "0.1.0"
+edition = "2021"
+description = "DNOS Non-Determinism Abstraction Layer — oracle-mediated containment of irreducible randomness"
+license = "Unlicense"
+repository = "https://github.com/emptymonad/dnos"
+
+[dependencies]
+# Zero external dependencies. The NDAL uses only std.
+# The IAL is a peer crate, not a dependency — they share
+# a token format but are independently deployable.
+
+[dev-dependencies]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

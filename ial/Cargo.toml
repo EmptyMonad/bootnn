@@ -1,0 +1,19 @@
+[package]
+name = "dnos-ial"
+version = "0.1.0"
+edition = "2021"
+description = "DNOS Input Abstraction Layer — determinism membrane for the neural substrate"
+license = "Unlicense"
+repository = "https://github.com/emptymonad/dnos"
+
+[dependencies]
+# No external dependencies. The IAL is a pure Rust crate with zero allocator
+# requirements beyond std. This is intentional: the IAL must be portable
+# to any environment that can run the DNOS substrate.
+
+[dev-dependencies]
+# Tests only use std
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
