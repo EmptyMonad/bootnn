@@ -1,0 +1,40 @@
+name: DNOS CI
+
+# Build the canon end-to-end on every push / PR:
+#   1. train + validate  (Python <-> assembly Q8.8 agreement, exits non-zero on divergence)
+#   2. build             (assemble dnos.asm, patch weights, pad image)
+#   3. boot test         (headless QEMU: reach PM/VESA without a triple fault)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm qemu-system-x86 python3-numpy
+
+      - name: Train + validate (Python <-> assembly agreement)
+        run: python3 tools/train.py
+
+      - name: Build image (assemble + patch weights + pad)
+        run: python3 tools/build.py
+
+      - name: Headless boot test (PM + VESA, no triple fault)
+        run: python3 tools/boot_test.py --seconds 8
+
+      - name: Upload boot screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-screenshot
+          path: boot_screenshot.png
+          if-no-files-found: ignore

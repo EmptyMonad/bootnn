@@ -25,8 +25,8 @@ IMAGE    := dnos.img
 WEIGHTS  := weights.bin
 
 # Build parameters
-EPOCHS   := 3000
-LR       := 0.05
+EPOCHS   := 4000
+LR       := 0.02
 
 # Weight sector offset in image
 # Stage1=1 sector, Stage2=4 sectors, Kernel=64 sectors → weights at sector 70 (offset=69)

@@ -116,9 +116,15 @@ def main():
         text = intlog.read_text(errors="ignore")
         resets = text.count("CPU Reset")
         faults = text.lower().count("triple")
-    print(f"[boot_test] screenshot: {out} "
-          f"({out.stat().st_size if out.exists() else 0} bytes)")
+    shot_bytes = out.stat().st_size if out.exists() else 0
+    print(f"[boot_test] screenshot: {out} ({shot_bytes} bytes)")
     print(f"[boot_test] cpu resets in trace: {resets}, triple-fault hits: {faults}")
+
+    # Pass criteria: we captured a non-empty framebuffer and the CPU did not
+    # triple-fault. (A couple of SeaBIOS startup resets are normal.)
+    ok = shot_bytes > 0 and faults == 0
+    print(f"[boot_test] result: {'PASS' if ok else 'FAIL'}")
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

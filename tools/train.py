@@ -716,6 +716,8 @@ def validate(weights_file, data):
     else:
         print(f"⚠ {mismatches} mismatches — review Q8.8 precision")
 
+    return mismatches
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -730,10 +732,10 @@ def main():
             pass
 
     parser = argparse.ArgumentParser(description='DNOS Tier 2 Weight Generator')
-    parser.add_argument('--epochs', type=int, default=3000,
-                        help='Training epochs (default: 3000)')
-    parser.add_argument('--lr', type=float, default=0.05,
-                        help='Learning rate (default: 0.05)')
+    parser.add_argument('--epochs', type=int, default=4000,
+                        help='Training epochs (default: 4000)')
+    parser.add_argument('--lr', type=float, default=0.02,
+                        help='Learning rate (default: 0.02)')
     parser.add_argument('--output', type=str, default='weights.bin',
                         help='Output weights file')
     parser.add_argument('--validate', type=str, default=None,
@@ -753,8 +755,8 @@ def main():
     print(f"Weights: {TOTAL_WEIGHTS:,}")
 
     if args.validate:
-        validate(args.validate, data)
-        return
+        mismatches = validate(args.validate, data)
+        sys.exit(1 if mismatches else 0)
 
     # Train
     net = Tier2Network()
@@ -763,14 +765,15 @@ def main():
     net.save(args.output)
 
     # Validate against assembly simulation
-    validate(args.output, data)
+    mismatches = validate(args.output, data)
 
     print("\n" + "=" * 60)
-    print("Build instructions:")
+    print("Build:  python tools/build.py   (assemble + patch + pad)")
+    print("Run:    python tools/build.py --run")
     print("=" * 60)
-    print("  nasm -f bin src/dnos.asm -o dnos.img")
-    print(f"  dd if={args.output} of=dnos.img bs=512 seek=69 conv=notrunc")
-    print("  qemu-system-i386 -fda dnos.img -m 16M")
+
+    # Non-zero exit on any divergence so CI fails loudly.
+    sys.exit(1 if mismatches else 0)
 
 if __name__ == '__main__':
     main()
