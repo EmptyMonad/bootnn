@@ -67,11 +67,13 @@ class QMP:
                 continue                   # skip async events
             return msg
 
-    def execute(self, cmd, **args):
+    def execute(self, cmd, expect_reply=True, **args):
         payload = {"execute": cmd}
         if args:
             payload["arguments"] = args
         self.f.write((json.dumps(payload) + "\r\n").encode())
+        if not expect_reply:
+            return None          # e.g. "quit": QEMU drops the socket immediately
         return self._read()
 
 
@@ -103,7 +105,12 @@ def main():
         time.sleep(args.seconds)
         r = qmp.execute("screendump", filename=str(out), format="png")
         print("[boot_test] screendump:", r)
-        qmp.execute("quit")
+        try:
+            qmp.execute("quit", expect_reply=False)
+        except OSError:
+            pass                 # QEMU may close the socket before we return
+    except OSError as e:
+        print(f"[boot_test] QMP connection error: {e}")
     finally:
         try:
             proc.wait(timeout=5)
