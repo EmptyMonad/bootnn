@@ -3,6 +3,9 @@ dnos.img
 weights.bin
 weights_test*.bin
 qemu_debug.log
+qemu_int.log
+boot_screenshot.png
+ci_log*
 *.o
 
 # Rust build output
