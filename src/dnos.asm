@@ -855,7 +855,7 @@ encode_input_32:
 .enc_bit:
     shr eax, 1
     jnc .enc_zero
-    mov word [edi], 0x7F00   ; Q8.8: ~127.0 (high activation)
+    mov word [edi], 0x0100   ; Q8.8: 1.0 (must match train.py INPUT_ACTIVE_LEVEL)
     jmp .enc_next
 .enc_zero:
     mov word [edi], 0x0000   ; Q8.8: 0.0

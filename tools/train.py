@@ -45,7 +45,16 @@ TOTAL_FILE_SIZE = HEADER_SIZE + WEIGHT_DATA_SIZE
 Q88_SCALE = 256
 Q88_MAX = 32767
 Q88_MIN = -32768
-Q88_HIGH_ACTIVATION = 0x7F00  # ~127.0 in Q8.8 (matches assembly)
+Q88_HIGH_ACTIVATION = 0x7F00  # legacy: ~127.0 in Q8.8 (no longer used for input)
+
+# Input active-bit level. MUST match dnos.asm encode_input_32 constant.
+#   1.0 float → Q8.8 raw 0x0100 (256). Small inputs keep pre-activations in
+#   range so gradients flow and Q8.8 clamping doesn't saturate the network.
+INPUT_ACTIVE_LEVEL = 1.0           # asm writes 0x0100 for a set bit
+
+# Maximum representable activation after ReLU clamp (int16 max in Q8.8 units).
+#   Assembly clamps every hidden activation to [0, 32767] raw = [0, ~128.0].
+ACT_MAX = Q88_MAX / Q88_SCALE      # 127.996
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Commands (must match dnos.asm CMD_* constants)
@@ -75,7 +84,7 @@ def ascii_to_binary_q88(key):
     vec = np.zeros(8, dtype=np.float32)
     for i in range(8):
         if (key >> i) & 1:
-            vec[i] = Q88_HIGH_ACTIVATION / Q88_SCALE  # ~127.0
+            vec[i] = INPUT_ACTIVE_LEVEL  # 1.0 → asm 0x0100
     return vec
 
 def sequence_to_input(keys):
@@ -302,55 +311,118 @@ class Tier2Network:
 
         return np.mean((self.a3 - y) ** 2)
 
+    def _ste_quant(self, w):
+        """Quantize weights to Q8.8 (forward). Straight-through on backward:
+        callers use the returned (quantized) value for the forward/backprop
+        matmuls but apply the gradient to the underlying float weight."""
+        return np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX) / Q88_SCALE
+
+    def _qat_forward(self, X, quantize=True):
+        """Forward pass that mirrors the assembly neural core for gradient
+        computation: Q8.8-quantized weights (STE), ReLU + clamp-to-ACT_MAX,
+        and activations re-quantized to the Q8.8 grid between layers (STE),
+        since the kernel stores each hidden activation as an int16.
+        Returns (logits, cache). Output argmax over [:20] equals the
+        assembly's because the piecewise sigmoid is monotonic."""
+        w1 = self._ste_quant(self.w1) if quantize else self.w1
+        w2 = self._ste_quant(self.w2) if quantize else self.w2
+        w3 = self._ste_quant(self.w3) if quantize else self.w3
+
+        z1 = X @ w1
+        a1 = np.clip(z1, 0, ACT_MAX)
+        if quantize:
+            a1 = np.round(a1 * Q88_SCALE) / Q88_SCALE   # int16 activation (STE)
+        z2 = a1 @ w2
+        a2 = np.clip(z2, 0, ACT_MAX)
+        if quantize:
+            a2 = np.round(a2 * Q88_SCALE) / Q88_SCALE
+        logits = a2 @ w3                         # output (pre piecewise-sigmoid)
+        cache = (X, w1, w2, w3, z1, a1, z2, a2)
+        return logits, cache
+
+    def _exact_int_logits(self, X):
+        """Bit-exact integer forward — vectorized twin of
+        simulate_assembly_forward (per-element imul/sar-8 then accumulate,
+        int16-clamped activations). Used as the ground-truth selection metric
+        so training optimizes what the kernel actually computes."""
+        def qw(w):
+            return np.clip(np.round(w * Q88_SCALE),
+                           Q88_MIN, Q88_MAX).astype(np.int64)
+        Xr = np.clip(np.round(X * Q88_SCALE), Q88_MIN, Q88_MAX).astype(np.int64)
+        w1r, w2r, w3r = qw(self.w1), qw(self.w2), qw(self.w3)
+        # >> 8 is arithmetic (floor) on int64, matching SAR in the kernel
+        z1 = ((Xr[:, :, None] * w1r[None, :, :]) >> 8).sum(axis=1)
+        a1 = np.clip(z1, 0, Q88_MAX)
+        z2 = ((a1[:, :, None] * w2r[None, :, :]) >> 8).sum(axis=1)
+        a2 = np.clip(z2, 0, Q88_MAX)
+        z3 = ((a2[:, :, None] * w3r[None, :, :]) >> 8).sum(axis=1)
+        return z3
+
     def train(self, data, epochs=2000, lr=0.001):
-        """Train with Adam optimizer and smooth sigmoid.
-        Uses smooth sigmoid for training (better gradients), validates
-        with piecewise sigmoid (matching assembly)."""
+        """Quantization-aware training with a classification objective.
+
+        The forward pass matches the assembly core exactly (ReLU + clamp,
+        Q8.8-quantized weights via straight-through estimator). The loss is
+        softmax cross-entropy over the 20 command outputs, which trains the
+        argmax the kernel actually decodes — instead of MSE against a smooth
+        sigmoid the bare-metal code never runs."""
         print(f"Training {TOTAL_WEIGHTS:,} weights on {len(data)} examples "
-              f"for {epochs} epochs...")
+              f"for {epochs} epochs (quantization-aware)...")
 
         X = np.array([d[0] for d in data], dtype=np.float32)
         Y = np.array([d[1] for d in data], dtype=np.float32)
+        cls = np.argmax(Y[:, :20], axis=1)       # target command class
 
-        # Adam state
         ms = [np.zeros_like(w) for w in [self.w1, self.w2, self.w3]]
         vs = [np.zeros_like(w) for w in [self.w1, self.w2, self.w3]]
         beta1, beta2, eps = 0.9, 0.999, 1e-8
 
         best_acc = 0
         best_weights = None
+        m = len(X)
 
         for epoch in range(epochs):
-            # Shuffle
-            idx = np.random.permutation(len(X))
-            Xs, Ys = X[idx], Y[idx]
+            idx = np.random.permutation(m)
+            Xs, cs = X[idx], cls[idx]
 
-            # Batch forward with smooth sigmoid
-            z1 = Xs @ self.w1; a1 = relu(z1)
-            z2 = a1 @ self.w2; a2 = relu(z2)
-            z3 = a2 @ self.w3
-            a3 = 1.0 / (1.0 + np.exp(-np.clip(z3, -10, 10)))
+            # --- Faithful (quantized) forward ---
+            logits, (Xc, w1q, w2q, w3q, z1, a1, z2, a2) = \
+                self._qat_forward(Xs, quantize=True)
 
-            loss = np.mean((a3 - Ys) ** 2)
+            # --- Softmax cross-entropy over the 20 command logits ---
+            l20 = logits[:, :20]
+            l20 = l20 - l20.max(axis=1, keepdims=True)
+            ex = np.exp(l20)
+            sm = ex / ex.sum(axis=1, keepdims=True)
+            loss = -np.mean(np.log(sm[np.arange(m), cs] + 1e-9))
 
-            # LR schedule
-            cur_lr = lr
-            if epoch > epochs * 2 // 3:
-                cur_lr = lr * 0.5
+            # --- Backward (straight-through through quantization & clamp) ---
+            dlogits = np.zeros_like(logits)
+            dlogits[:, :20] = sm
+            dlogits[np.arange(m), cs] -= 1.0
+            dlogits /= m
 
-            # Batch backward
-            m = len(Xs)
-            sig_d = a3 * (1 - a3)
-            dz3 = (a3 - Ys) * sig_d
-            dw3 = a2.T @ dz3 / m
+            # Soft cap: keep every logit inside the output's piecewise-linear
+            # region (|float| < 32 ⇔ |raw| < 8192). Outside it the kernel's
+            # sigmoid saturates and argmax ties collapse, so we penalize logits
+            # beyond ±CAP. This is what keeps the exact-int metric == validator.
+            CAP, CAP_LAMBDA = 28.0, 1e-3
+            over = np.clip(np.abs(logits) - CAP, 0, None)
+            loss += CAP_LAMBDA * np.mean(np.sum(over ** 2, axis=1))
+            dlogits += CAP_LAMBDA * 2.0 * over * np.sign(logits) / m
 
-            dz2 = (dz3 @ self.w3.T) * (z2 > 0).astype(np.float32)
-            dw2 = a1.T @ dz2 / m
+            dw3 = a2.T @ dlogits
+            da2 = dlogits @ w3q.T
+            dz2 = da2 * ((z2 > 0) & (z2 < ACT_MAX))
+            dw2 = a1.T @ dz2
+            da1 = dz2 @ w2q.T
+            dz1 = da1 * ((z1 > 0) & (z1 < ACT_MAX))
+            dw1 = Xc.T @ dz1
 
-            dz1 = (dz2 @ self.w2.T) * (z1 > 0).astype(np.float32)
-            dw1 = Xs.T @ dz1 / m
+            # LR schedule: decay in the final third
+            cur_lr = lr * (0.5 if epoch > epochs * 2 // 3 else 1.0)
 
-            # Adam update
+            # Adam update (applied to float master weights)
             t_adam = epoch + 1
             for i, (w, dw) in enumerate(
                     [(self.w1, dw1), (self.w2, dw2), (self.w3, dw3)]):
@@ -360,21 +432,30 @@ class Tier2Network:
                 v_hat = vs[i] / (1 - beta2 ** t_adam)
                 w -= cur_lr * m_hat / (np.sqrt(v_hat) + eps)
 
-            if epoch % 1000 == 0 or epoch == epochs - 1:
-                acc = self._test_accuracy(data, quantize=False)
-                acc_pw = self._test_accuracy_piecewise(data)
-                if acc_pw > best_acc:
-                    best_acc = acc_pw
+            if epoch % 500 == 0 or epoch == epochs - 1:
+                acc_q = self._qat_accuracy(X, cls)
+                if acc_q >= best_acc:
+                    best_acc = acc_q
                     best_weights = (self.w1.copy(), self.w2.copy(),
                                     self.w3.copy())
-                print(f"  Epoch {epoch:5d}: loss={loss:.6f}  "
-                      f"acc={acc:.1f}%  pw_acc={acc_pw:.1f}%  "
-                      f"best={best_acc:.1f}%")
+                print(f"  Epoch {epoch:5d}: loss={loss:.4f}  "
+                      f"qat_acc={acc_q:.1f}%  best={best_acc:.1f}%")
 
-        # Restore best weights
+        # Restore best quantized-accuracy weights
         if best_weights:
             self.w1, self.w2, self.w3 = best_weights
-        print(f"\n  Best piecewise accuracy: {best_acc:.1f}%")
+        print(f"\n  Best quantization-aware accuracy: {best_acc:.1f}%")
+
+    def _qat_accuracy(self, X, cls):
+        """Accuracy under the bit-exact integer forward (the metric the
+        bare-metal kernel will reproduce)."""
+        z3 = self._exact_int_logits(X)
+        # Apply the integer piecewise sigmoid before argmax, exactly as
+        # simulate_assembly_forward / the kernel do (saturation + tie order).
+        out = np.where(z3 < -8192, 0,
+                       np.where(z3 > 8192, 32767, (z3 + 8192) * 2))
+        preds = np.argmax(out[:, :20], axis=1)
+        return 100 * np.mean(preds == cls)
 
     def _test_accuracy_piecewise(self, data):
         """Test accuracy using the piecewise sigmoid that matches assembly."""
@@ -640,6 +721,14 @@ def validate(weights_file, data):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    # Ensure UTF-8 output even on legacy Windows consoles (cp1252) so the
+    # ✓/✗/→ status glyphs don't crash the build.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8')
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(description='DNOS Tier 2 Weight Generator')
     parser.add_argument('--epochs', type=int, default=3000,
                         help='Training epochs (default: 3000)')
@@ -649,7 +738,13 @@ def main():
                         help='Output weights file')
     parser.add_argument('--validate', type=str, default=None,
                         help='Validate existing weights file')
+    parser.add_argument('--seed', type=int, default=1337,
+                        help='RNG seed for reproducible canonical weights '
+                             '(default: 1337)')
     args = parser.parse_args()
+
+    # Deterministic NOS: fixed seed → identical "canonical" weights every build.
+    np.random.seed(args.seed)
 
     # Generate training data
     data = generate_training_data()
