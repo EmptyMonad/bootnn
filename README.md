@@ -10,16 +10,26 @@ No scheduler. No processes. No drivers. The neural network directly controls har
 
 ## Quick Start
 
+Linux (Make):
 ```bash
 sudo apt install nasm qemu-system-x86 python3-numpy
 make && make run
 ```
 
+Any platform (Windows / macOS / Linux), no `make`/`dd`/`truncate` required:
+```bash
+python tools/build.py --run      # train + assemble + patch + boot in QEMU
+```
+
 ## What Happens
 
-DNOS boots from a floppy image into 32-bit protected mode, loads 43,008 trained weights into memory, and enters a loop: keyboard input → neural forward pass → screen output. On first boot, a demo sequence feeds synthetic keypresses through the network to prove the substrate is alive.
+DNOS boots from a hard-disk image — stage 1 → stage 2 (16-bit) → 32-bit protected mode, using INT 13h LBA reads (no CHS geometry limits). It loads 43,008 trained weights into memory and enters a loop: keyboard input → neural forward pass → screen output. On first boot, a demo sequence feeds synthetic keypresses through the network to prove the substrate is alive.
 
 Type `box` and the network draws a rectangle. Type `line` and it draws a line. Press `p` for a pixel. The network learned these mappings during offline training — the assembly code contains no `if key == 'b' then draw_rect` logic. It's weights all the way down.
+
+**Display:** the kernel uses a 32bpp VESA linear framebuffer when one is available and falls back to 320×200 VGA otherwise. (SeaBIOS exposes only a 24bpp VBE mode at 800×600, which the 32bpp-only drawing path declines — so under QEMU you currently get the clean VGA fallback.)
+
+**Verified:** training reaches 100% accuracy in both float and Q8.8, with bit-exact Python↔assembly agreement; weights are deterministic (seeded). A headless QEMU boot test runs in CI on every push and screenshots the framebuffer.
 
 ## Architecture
 
@@ -54,9 +64,12 @@ Physical World
 ## Project Structure
 
 ```
-├── src/dnos.asm          Bootable kernel (32-bit PM, VESA, IRQ, neural core)
-├── tools/train.py        Training pipeline (Adam, Q8.8-aware, 100% accuracy)
-├── Makefile              make && make run
+├── src/dnos.asm          Bootable kernel (32-bit PM, VESA/VGA, IRQ, neural core)
+├── tools/train.py        Training (quantization-aware, 100% Q8.8 accuracy, seeded)
+├── tools/build.py        Cross-platform build: assemble + patch weights + pad
+├── tools/boot_test.py    Headless QEMU smoke test (screenshot + fault check)
+├── Makefile              make && make run (Linux)
+├── .github/workflows/    CI: train → build → boot test on every push
 │
 ├── ial/                  Input Abstraction Layer (Rust)
 │   ├── src/              Temporal/spatial quantizers, semantic encoder, canonicalizer
@@ -75,14 +88,15 @@ Physical World
 | Tier | Weights | Mode | Status |
 |------|---------|------|--------|
 | 1 | 2,560 | 16-bit real mode | Complete (in `legacy/`) |
-| 2 | 43,008 | 32-bit protected mode | Current |
+| 2 | 43,008 | 32-bit protected mode | **Current — boots, 100% Q8.8 accuracy, CI-tested** |
 | 3 | ~1M | Paging + disk swap | Planned |
 | 4+ | 10M–10B | GPU / distributed | Research |
 
-Long-term: memristor crossbar arrays where matrix multiplication happens as physics (Ohm's Law), not computation.
+See **[ROADMAP.md](ROADMAP.md)** for the detailed, status-tracked plan. Long-term: memristor crossbar arrays where matrix multiplication happens as physics (Ohm's Law), not computation.
 
-## Building
+## Building & Testing
 
+Linux (Make):
 ```bash
 make              # Assemble + train + patch weights → dnos.img
 make run          # Build and launch in QEMU
@@ -91,7 +105,17 @@ make validate     # Train + verify Python↔assembly math agreement
 make clean        # Remove artifacts
 ```
 
-Requires `nasm`, `python3` with `numpy`, and `qemu-system-i386`.
+Cross-platform (Python — no `make`/`dd`/`truncate`):
+```bash
+python tools/train.py            # train + validate (exits non-zero on divergence)
+python tools/build.py            # assemble + patch weights + pad image
+python tools/build.py --run      # ...and boot in QEMU
+python tools/boot_test.py        # headless boot smoke test (screenshot + PASS/FAIL)
+```
+
+Every push runs the full pipeline (train → build → boot test) in **GitHub Actions**; the boot screenshot is uploaded as a build artifact.
+
+Requires `nasm`, `python3` with `numpy`, and `qemu-system-i386` (`qemu-system-x86` on Debian/Ubuntu).
 
 ## License
 
