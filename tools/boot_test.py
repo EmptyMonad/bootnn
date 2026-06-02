@@ -89,7 +89,7 @@ def main():
     out = Path(args.out).resolve()
 
     cmd = [
-        qemu, "-fda", str(IMAGE), "-m", "16M",
+        qemu, "-drive", f"file={IMAGE},format=raw", "-m", "16M",
         "-display", "none",
         "-qmp", f"tcp:127.0.0.1:{args.port},server,nowait",
         "-d", "int,cpu_reset", "-D", str(intlog),

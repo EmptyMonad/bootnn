@@ -113,7 +113,8 @@ def pad_image():
 
 def boot(qemu, extra):
     print("[DNOS] Booting in QEMU...")
-    run([qemu, "-fda", str(IMAGE), "-m", "16M", *extra])
+    # Boot as a hard disk so the bootloader can use INT 13h LBA extensions.
+    run([qemu, "-drive", f"file={IMAGE},format=raw", "-m", "16M", *extra])
 
 
 def main():

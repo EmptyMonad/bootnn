@@ -41,8 +41,11 @@
 
 STAGE2_SECTORS  equ 4
 STAGE2_ADDR     equ 0x7E00
-KERNEL_SECTORS  equ 64          ; 32KB
-KERNEL_ADDR     equ 0x8000
+STAGE2_LBA      equ 1           ; LBA of stage 2 (sector 0 = stage 1)
+KERNEL_SECTORS  equ 32          ; sectors to load (covers ~2.2KB code + margin)
+KERNEL_ADDR     equ 0x8600      ; MUST equal linked pm_entry (org 0x7C00 + 0xA00)
+KERNEL_LBA      equ 5           ; LBA where the kernel image begins
+WEIGHTS_LBA     equ 69          ; LBA where the weight blob begins
 
 boot_entry:
     cli
@@ -59,47 +62,23 @@ boot_entry:
     mov si, msg_loading
     call print16
 
-    ;--- Load stage 2 (sectors 2-5) to 0x7E00 ---
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, STAGE2_ADDR
-    mov ah, 0x02
-    mov al, STAGE2_SECTORS
-    mov ch, 0
-    mov cl, 2
-    mov dh, 0
+    ;--- Verify INT 13h extensions (LBA addressing) are available ---
+    mov ah, 0x41
+    mov bx, 0x55AA
     mov dl, [boot_drive]
     int 0x13
-    jc .disk_err
+    jc .no_lba
+    cmp bx, 0xAA55
+    jne .no_lba
 
-    ;--- Load kernel (sectors 6-69, 32KB) to 0x8000 ---
-    ; Split into two 16KB chunks to avoid DMA boundary crossing
-    ; Chunk 1: sectors 6-37 (16KB) to 0x0000:0x8000
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, KERNEL_ADDR
-    mov ah, 0x02
-    mov al, 32              ; 16KB
-    mov ch, 0
-    mov cl, 6
-    mov dh, 0
+    ;--- Load stage 2 via LBA (AH=42h) to 0x0000:0x7E00 ---
+    mov word [dap1_count], STAGE2_SECTORS
+    mov word [dap1_off], STAGE2_ADDR
+    mov word [dap1_seg], 0x0000
+    mov dword [dap1_lba], STAGE2_LBA
+    mov ah, 0x42
     mov dl, [boot_drive]
-    int 0x13
-    jc .disk_err
-
-    ; Chunk 2: sectors 38-69 (16KB) to 0x0000:0x10000
-    ; Use segment trick: 0x1000:0x0000 = physical 0x10000
-    ; But wait — 0x8000 + 0x4000 = 0xC000, still within segment 0
-    ; So we can load directly
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, 0xC000          ; 0x8000 + 16KB
-    mov ah, 0x02
-    mov al, 32
-    mov ch, 0
-    mov cl, 38
-    mov dh, 0
-    mov dl, [boot_drive]
+    mov si, dap1
     int 0x13
     jc .disk_err
 
@@ -109,6 +88,11 @@ boot_entry:
 
 .disk_err:
     mov si, msg_disk_err
+    call print16
+    jmp $
+
+.no_lba:
+    mov si, msg_no_lba
     call print16
     jmp $
 
@@ -128,6 +112,17 @@ print16:
 boot_drive:   db 0
 msg_loading:  db 'DNOS T2...', 13, 10, 0
 msg_disk_err: db 'DISK ERR', 0
+msg_no_lba:   db 'NO LBA', 0
+
+; Disk Address Packet for stage 1's LBA read
+align 4
+dap1:         db 0x10          ; packet size
+              db 0             ; reserved
+dap1_count:   dw 0             ; sectors to transfer
+dap1_off:     dw 0             ; dest offset
+dap1_seg:     dw 0             ; dest segment
+dap1_lba:     dd 0             ; LBA (low 32)
+              dd 0             ; LBA (high 32)
 
 times 510 - ($ - boot_entry) db 0
 dw 0xAA55
@@ -143,9 +138,13 @@ stage2_entry:
     cli
     mov [s2_boot_drive], dl
 
-    ;--- Load weights in real mode (sectors 70-239, 86KB) ---
-    ; Must load before PM switch because we need BIOS INT 13h
-    ; DMA-safe: load in 16KB (32-sector) chunks
+    ;--- Load the 32-bit kernel via LBA to its linked address (0x8600) ---
+    ; Must happen here (not stage 1) so it lands just past stage 2 instead
+    ; of overlapping it. Uses INT 13h AH=42h (LBA), so no CHS limits.
+    call load_kernel
+
+    ;--- Load weights via LBA (full 170 sectors → 0x10000..0x25400) ---
+    ; Must load before PM switch because we need BIOS INT 13h.
     call load_weights
 
     ;--- VESA video mode ---
@@ -165,86 +164,82 @@ stage2_entry:
     jmp 0x08:pm_entry
 
 ;---------------------------------------
-; Load weights: 86KB in 16KB chunks
-; Sectors 70-239 → physical 0x10000-0x25000
+; load_kernel — KERNEL_SECTORS from KERNEL_LBA → 0x0000:KERNEL_ADDR (0x8600)
+; Lands at the kernel's linked address, below 0x10000, single read.
 ;---------------------------------------
-load_weights:
+load_kernel:
     pusha
-
-    ; Chunk 1: 32 sectors → 0x1000:0x0000 (phys 0x10000)
-    mov ax, 0x1000
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 32
-    mov ch, 0
-    mov cl, 70              ; LBA-ish (works for floppy CHS too)
-    mov dh, 0
-    mov dl, [s2_boot_drive]
-    int 0x13
-    jc .wt_err
-
-    ; Chunk 2: 32 sectors → 0x1400:0x0000 (phys 0x14000)
-    mov ax, 0x1400
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 32
-    mov ch, 0
-    mov cl, 102
-    mov dh, 0
-    mov dl, [s2_boot_drive]
-    int 0x13
-    jc .wt_err
-
-    ; Chunk 3: 32 sectors → 0x1800:0x0000 (phys 0x18000)
-    mov ax, 0x1800
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 32
-    mov ch, 0
-    mov cl, 134
-    mov dh, 0
-    mov dl, [s2_boot_drive]
-    int 0x13
-    jc .wt_err
-
-    ; Chunk 4: 32 sectors → 0x1C00:0x0000 (phys 0x1C000)
-    mov ax, 0x1C00
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 32
-    mov ch, 0
-    mov cl, 166
-    mov dh, 0
-    mov dl, [s2_boot_drive]
-    int 0x13
-    jc .wt_err
-
-    ; Chunk 5: remaining sectors → 0x2000:0x0000 (phys 0x20000)
-    mov ax, 0x2000
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 8               ; Remaining
-    mov ch, 0
-    mov cl, 198
-    mov dh, 0
-    mov dl, [s2_boot_drive]
-    int 0x13
-    jc .wt_err
-
+    mov ax, KERNEL_SECTORS
+    mov bx, 0x0000           ; dest segment
+    mov dx, KERNEL_ADDR      ; dest offset
+    mov cx, KERNEL_LBA       ; LBA (low 16)
+    call disk_read
     popa
     ret
 
-.wt_err:
+;---------------------------------------
+; load_weights — full 170 sectors from WEIGHTS_LBA → 0x10000..0x25400
+; Six segment-aligned 16KB chunks: contiguous for WEIGHT_BASE and none
+; crosses a 64KB DMA boundary.
+;---------------------------------------
+load_weights:
+    pusha
+    mov si, weight_chunks
+    mov bp, 6
+.wc_loop:
+    mov ax, [si]             ; sector count
+    mov bx, [si+2]           ; dest segment
+    xor dx, dx               ; dest offset = 0
+    mov cx, [si+4]           ; LBA
+    call disk_read
+    add si, 6
+    dec bp
+    jnz .wc_loop
+    popa
+    ret
+
+; count, dest-segment, LBA   (segment*16 = physical base)
+weight_chunks:
+    dw 32, 0x1000, WEIGHTS_LBA          ; phys 0x10000
+    dw 32, 0x1400, WEIGHTS_LBA + 32     ; phys 0x14000
+    dw 32, 0x1800, WEIGHTS_LBA + 64     ; phys 0x18000
+    dw 32, 0x1C00, WEIGHTS_LBA + 96     ; phys 0x1C000
+    dw 32, 0x2000, WEIGHTS_LBA + 128    ; phys 0x20000
+    dw 10, 0x2400, WEIGHTS_LBA + 160    ; phys 0x24000  (170 total)
+
+;---------------------------------------
+; disk_read — INT 13h AH=42h LBA read
+;   AX = sector count, BX = dest segment, DX = dest offset, CX = LBA (low 16)
+;---------------------------------------
+disk_read:
+    push si
+    mov [dap_count], ax
+    mov [dap_seg], bx
+    mov [dap_off], dx
+    mov [dap_lba], cx
+    mov word [dap_lba+2], 0
+    mov ah, 0x42
+    mov dl, [s2_boot_drive]
+    mov si, dap
+    int 0x13
+    jc .err
+    pop si
+    ret
+.err:
     mov si, msg_wt_err
     call print16_s2
     jmp $
 
 msg_wt_err: db 'WT ERR', 0
+
+align 4
+dap:        db 0x10          ; packet size
+            db 0             ; reserved
+dap_count:  dw 0
+dap_off:    dw 0
+dap_seg:    dw 0
+dap_lba:    dd 0             ; LBA low 32
+            dd 0             ; LBA high 32
 
 ;---------------------------------------
 ; VESA Setup
@@ -422,9 +417,9 @@ times 2560 - ($ - boot_entry) db 0
 [bits 32]
 
 ;--- Constants ---
-WEIGHT_BASE     equ 0x10000     ; Physical address of weights
-ACTIV_BASE      equ 0x20000     ; Activations scratch
-HISTORY_BASE    equ 0x30000     ; Input history buffer
+WEIGHT_BASE     equ 0x10000     ; Weights: 0x10000 .. 0x25400 (170 sectors)
+ACTIV_BASE      equ 0x60000     ; Activations scratch (moved clear of weights)
+HISTORY_BASE    equ 0x30000     ; Input history buffer (above weight region)
 KEYBUF_BASE     equ 0x70000     ; Keyboard ring buffer
 
 ; Network topology
