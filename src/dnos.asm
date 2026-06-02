@@ -273,6 +273,14 @@ setup_vesa:
     mov [scr_height], ax
     mov al, [vesa_info_buf + 25]
     mov [scr_bpp], al
+    mov ax, [vesa_info_buf + 16]     ; BytesPerScanLine (true pitch)
+    mov [scr_pitch], ax
+
+    ; The kernel's drawing code is 32bpp-only. If this mode isn't 32bpp
+    ; (VBE 0x115 is 24bpp on many BIOSes), fall back to VGA rather than
+    ; shear every scanline.
+    cmp byte [scr_bpp], 32
+    jne .vesa_fallback
 
     ; Set the mode
     mov ax, 0x4F02
@@ -293,6 +301,7 @@ setup_vesa:
     mov word [scr_width], 320
     mov word [scr_height], 200
     mov byte [scr_bpp], 8
+    mov word [scr_pitch], 320        ; VGA mode 13h: 1 byte/pixel
     mov dword [lfb_addr], 0xA0000
 
     popa
@@ -386,6 +395,7 @@ video_mode:     db 0            ; 0=VGA, 1=VESA
 scr_width:      dw 0
 scr_height:     dw 0
 scr_bpp:        db 0
+scr_pitch:      dw 0
 lfb_addr:       dd 0
 
 print16_s2:
@@ -490,6 +500,8 @@ pm_entry:
     mov [k_scr_height], eax
     movzx eax, byte [stage2_entry + (scr_bpp - stage2_entry)]
     mov [k_scr_bpp], eax
+    movzx eax, word [stage2_entry + (scr_pitch - stage2_entry)]
+    mov [k_scr_pitch], eax
 
     ; Set up IDT
     call setup_idt
@@ -1184,10 +1196,10 @@ pixel_offset:
     ret
 
 .vesa_calc:
-    ; VESA 32bpp: offset = (y * width + x) * 4
-    imul ebx, [k_scr_width]
+    ; VESA 32bpp: offset = y * pitch + x * 4
+    imul ebx, [k_scr_pitch]
+    shl eax, 2               ; x * 4 for 32bpp
     add ebx, eax
-    shl ebx, 2               ; * 4 for 32bpp
     mov edi, [k_lfb_addr]
     add edi, ebx
     pop edx
@@ -1284,8 +1296,7 @@ draw_vline_32:
     ret
 
 .vesa_vl:
-    mov edx, [k_scr_width]
-    shl edx, 2
+    mov edx, [k_scr_pitch]
 .vesa_vl_loop:
     mov [edi], eax
     add edi, edx
@@ -1363,8 +1374,9 @@ clear_screen:
     ret
 
 .vesa_cls:
-    mov ecx, [k_scr_width]
+    mov ecx, [k_scr_pitch]
     imul ecx, [k_scr_height]
+    shr ecx, 2               ; whole framebuffer (pitch*height) in dwords
     mov eax, 0x00102040      ; Dark blue ARGB
     rep stosd
     popad
@@ -1389,8 +1401,9 @@ fill_screen_32:
     ret
 
 .vesa_fill:
-    mov ecx, [k_scr_width]
+    mov ecx, [k_scr_pitch]
     imul ecx, [k_scr_height]
+    shr ecx, 2               ; whole framebuffer in dwords
     rep stosd
     popad
     ret
@@ -1456,12 +1469,21 @@ draw_status_bar:
     ret
 
 .sb_vesa:
-    shl eax, 2               ; 32bpp
+    ; Start at (height-16) * pitch; fill 16 rows of width px, stepping by pitch
+    mov eax, [k_scr_height]
+    sub eax, 16
+    imul eax, [k_scr_pitch]
     add edi, eax
+    mov edx, 16              ; rows
+.sb_vesa_row:
+    push edi
     mov ecx, [k_scr_width]
-    imul ecx, 16
     mov eax, 0x00333333      ; Dark gray ARGB
     rep stosd
+    pop edi
+    add edi, [k_scr_pitch]
+    dec edx
+    jnz .sb_vesa_row
     popad
     ret
 
@@ -1515,6 +1537,7 @@ k_lfb_addr:     dd 0
 k_scr_width:    dd 0
 k_scr_height:   dd 0
 k_scr_bpp:      dd 0
+k_scr_pitch:    dd 0
 
 cursor_x:       dd 400
 cursor_y:       dd 300
