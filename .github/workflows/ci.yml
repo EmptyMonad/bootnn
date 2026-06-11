@@ -25,6 +25,9 @@ jobs:
       - name: Train + validate (Python <-> assembly agreement)
         run: python3 tools/train.py
 
+      - name: Context-generalization eval (held-out random histories)
+        run: python3 tools/context_eval.py --min-accuracy 95
+
       - name: Build image (assemble + patch weights + pad)
         run: python3 tools/build.py
 

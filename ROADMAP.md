@@ -112,16 +112,20 @@ falsifiable.
    prediction for the same history (`tools/interactive_test.py`).
 5. 📋 Bitmap font for on-screen text.
 6. 📋 Tier 3 design doc (paging + weight streaming).
-7. 📋 **Generalization, not memorization.** With 43k weights and ~400
-   examples the network memorizes; under deep unseen histories some keys
-   still decode to the wrong command (the substrate faithfully computes a
-   law that is itself wrong). Drawing-board item for emergent neuromorphics:
-   train for context invariance explicitly (contrastive histories, dropout
-   on history slots, or an architectural attention split between slot 0 and
-   context), and quantify it with a held-out random-context eval set.
+7. ✅ ~~Generalization, not memorization~~ — measured and solved.
+   `tools/context_eval.py` scores single-key commands under held-out random
+   histories (seeded, assembly-exact simulator): the frozen-augmentation
+   model scored **53.9%** (e.g. pixel→hline ×30 confusions). Training now
+   *resamples* the random-context examples every 50 epochs, so the network
+   learns the history distribution instead of one sample: **100.0%**
+   (1050/1050) on the same held-out eval, with the original suite still at
+   100% and zero Q8.8 divergence. CI gates at ≥95%. The differential
+   interactive test confirms on metal: 12/12 keys law==metal, 9/9 draw
+   commands visible.
 8. 📋 Demo/test color state: the boot demo can leave color == background
-   (white on white), making correct draws invisible. Either pin the palette
-   for the demo or have the demo end with a canonical clear + color reset.
+   (white on white), making correct draws invisible. Mostly mitigated by #7
+   (the demo's untrained keys no longer fire fill/color chaos), but the
+   palette should still be pinned for a canonical demo.
 
 ## How correctness is enforced
 

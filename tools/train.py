@@ -112,8 +112,13 @@ def command_to_output(cmd_idx, dx=0, dy=0):
 # Training Data Generation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_training_data():
-    """Generate comprehensive training examples."""
+def generate_training_data(ctx_rng=None):
+    """Generate comprehensive training examples.
+
+    `ctx_rng` drives the random-history augmentation; passing a persistent
+    generator yields a fresh context sample per call (used by train() to
+    resample contexts during training so the network learns the history
+    *distribution* instead of memorizing a fixed set)."""
     data = []
 
     # --- Single key commands ---
@@ -151,7 +156,8 @@ def generate_training_data():
     # single-key mapping must hold regardless of history. Without these,
     # the network is context-sensitive and misclassifies after the boot
     # demo (e.g. 'b' → move_right). Seeded: data stays deterministic.
-    ctx_rng = np.random.default_rng(20260610)
+    if ctx_rng is None:
+        ctx_rng = np.random.default_rng(20260610)
     history_pool = sorted({k for k, _, _ in single_keys}
                           | {ord(c) for c in 'boxlinerectpixfilcsudwnghty'})
     for key, cmd, desc in single_keys:
@@ -375,7 +381,8 @@ class Tier2Network:
         z3 = ((a2[:, :, None] * w3r[None, :, :]) >> 8).sum(axis=1)
         return z3
 
-    def train(self, data, epochs=2000, lr=0.001):
+    def train(self, data, epochs=2000, lr=0.001, resample=None,
+              resample_every=50):
         """Quantization-aware training with a classification objective.
 
         The forward pass matches the assembly core exactly (ReLU + clamp,
@@ -399,6 +406,15 @@ class Tier2Network:
         m = len(X)
 
         for epoch in range(epochs):
+            # Periodically redraw the random-context examples so the network
+            # trains on the history distribution, not one frozen sample.
+            if resample and epoch and epoch % resample_every == 0:
+                fresh = resample()
+                X = np.array([d[0] for d in fresh], dtype=np.float32)
+                Y = np.array([d[1] for d in fresh], dtype=np.float32)
+                cls = np.argmax(Y[:, :20], axis=1)
+                m = len(X)
+
             idx = np.random.permutation(m)
             Xs, cs = X[idx], cls[idx]
 
@@ -775,9 +791,13 @@ def main():
         mismatches = validate(args.validate, data)
         sys.exit(1 if mismatches else 0)
 
-    # Train
+    # Train. A persistent generator redraws the random-context examples
+    # every resample interval — deterministic overall (fixed seed), but the
+    # network sees a stream of histories instead of one frozen sample.
+    ctx_stream = np.random.default_rng(20260610)
     net = Tier2Network()
-    net.train(data, epochs=args.epochs, lr=args.lr)
+    net.train(data, epochs=args.epochs, lr=args.lr,
+              resample=lambda: generate_training_data(ctx_stream))
     net.test(data)
     net.save(args.output)
 

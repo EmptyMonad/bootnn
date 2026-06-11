@@ -16,3 +16,4 @@ ci_log*
 # Rust build output
 target/
 __pycache__/
+final_state.png
