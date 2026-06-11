@@ -503,6 +503,16 @@ pm_entry:
     movzx eax, word [stage2_entry + (scr_pitch - stage2_entry)]
     mov [k_scr_pitch], eax
 
+    ; Start the cursor at screen centre for whatever mode we got.
+    ; (The static initializers assumed 800x600; under the VGA fallback
+    ; they clamp to the bottom-right corner, inside the status bar.)
+    mov eax, [k_scr_width]
+    shr eax, 1
+    mov [cursor_x], eax
+    mov eax, [k_scr_height]
+    shr eax, 1
+    mov [cursor_y], eax
+
     ; Set up IDT
     call setup_idt
 
@@ -906,7 +916,8 @@ neural_forward_32:
 .L1_sum:
     movsx eax, word [esi]            ; Input activation (Q8.8)
     movsx edi, word [WEIGHT_BASE + edx]  ; Weight (Q8.8)
-    imul edi                         ; EAX = a * w (Q16.16)
+    imul eax, edi                    ; EAX = a * w (Q16.16); two-operand form —
+                                     ; one-operand imul clobbers EDX (weight ptr)
     sar eax, 8                       ; → Q8.8
     add ebx, eax                     ; Accumulate
     add esi, 2
@@ -950,7 +961,7 @@ neural_forward_32:
 .L2_sum:
     movsx eax, word [esi]
     movsx edi, word [WEIGHT_BASE + edx]
-    imul edi
+    imul eax, edi                    ; two-operand: must not clobber EDX
     sar eax, 8
     add ebx, eax
     add esi, 2
@@ -992,7 +1003,7 @@ neural_forward_32:
 .L3_sum:
     movsx eax, word [esi]
     movsx edi, word [WEIGHT_BASE + edx]
-    imul edi
+    imul eax, edi                    ; two-operand: must not clobber EDX
     sar eax, 8
     add ebx, eax
     add esi, 2
@@ -1055,12 +1066,16 @@ decode_output_32:
     mov [last_cmd], ebx
     mov [last_confidence], edx
 
-    ; Extract cursor deltas from outputs 20-23
+    ; Extract cursor deltas from outputs 20-23. The piecewise sigmoid
+    ; maps "zero delta" to its midpoint 16384, not 0 — subtract it
+    ; first or every inference drifts the cursor +16,+16.
     movsx eax, word [ACTIV_BASE + A_OUTPUT + 20*2]
-    sar eax, 10              ; Scale to ±31
+    sub eax, 16384
+    sar eax, 10              ; Scale to ±16
     add [cursor_x], eax
 
     movsx eax, word [ACTIV_BASE + A_OUTPUT + 22*2]
+    sub eax, 16384
     sar eax, 10
     add [cursor_y], eax
 
@@ -1080,7 +1095,9 @@ decode_output_32:
     mov dword [cursor_y], 0
 .cy_ok:
     mov eax, [k_scr_height]
-    sub eax, 20              ; Reserve status bar
+    sub eax, 21              ; Stay above the 20px status bar, which
+                             ; repaints every 16 ticks and would erase
+                             ; anything drawn inside it
     cmp [cursor_y], eax
     jle .cy_ok2
     mov [cursor_y], eax
@@ -1147,6 +1164,11 @@ decode_output_32:
     jmp .cmd_done
 .cmd_mv_down:
     add dword [cursor_y], 10
+    mov eax, [k_scr_height]
+    sub eax, 21
+    cmp [cursor_y], eax
+    jle .cmd_done
+    mov [cursor_y], eax
     jmp .cmd_done
 .cmd_mv_left:
     sub dword [cursor_x], 10
@@ -1156,6 +1178,11 @@ decode_output_32:
     jmp .cmd_done
 .cmd_mv_right:
     add dword [cursor_x], 10
+    mov eax, [k_scr_width]
+    dec eax
+    cmp [cursor_x], eax
+    jle .cmd_done
+    mov [cursor_x], eax
     jmp .cmd_done
 .cmd_color_next:
     inc byte [color_idx]
@@ -1325,9 +1352,8 @@ draw_rect_32:
     call draw_vline_32
 
     ; Right
-    push dword [cursor_x]
-    pop eax
-    add eax, ecx
+    mov eax, [cursor_x]
+    add eax, [esp+4]         ; + width (ECX clobbered by the Left edge)
     dec eax
     push dword [cursor_x]
     mov [cursor_x], eax

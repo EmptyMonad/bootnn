@@ -39,6 +39,16 @@ ASM_SRC  = ROOT / "src" / "dnos.asm"
 TRAIN    = ROOT / "tools" / "train.py"
 IMAGE    = ROOT / "dnos.img"
 WEIGHTS  = ROOT / "weights.bin"
+LISTING  = ROOT / "dnos.lst"
+SYMBOLS  = ROOT / "dnos_symbols.json"
+ORG_BASE = 0x7C00             # whole image is org 0x7C00; phys = org + file offset
+
+# Kernel variables exported to dnos_symbols.json for the boot/interactive
+# tests to inspect via the QEMU monitor.
+SYMBOL_NAMES = {
+    "tick_count", "last_cmd", "last_confidence", "cursor_x", "cursor_y",
+    "color_idx", "draw_size", "kb_read_idx", "kb_write_idx", "k_video_mode",
+}
 
 # Fallback install locations (this machine + common defaults).
 NASM_CANDIDATES = [
@@ -74,7 +84,23 @@ def run(cmd):
 
 def assemble(nasm):
     print(f"[DNOS] Assembling {ASM_SRC.relative_to(ROOT)} -> {IMAGE.name}")
-    run([nasm, "-f", "bin", str(ASM_SRC), "-o", str(IMAGE)])
+    run([nasm, "-f", "bin", str(ASM_SRC), "-o", str(IMAGE), "-l", str(LISTING)])
+    export_symbols()
+
+
+def export_symbols():
+    """Parse the NASM listing for known data labels and write their physical
+    addresses to dnos_symbols.json so tests can inspect kernel state."""
+    import json
+    import re
+    symbols = {}
+    pattern = re.compile(r"^\s*\d+\s+([0-9A-F]{8})\s+\S+\s+(\w+):")
+    for line in LISTING.read_text(errors="ignore").splitlines():
+        m = pattern.match(line)
+        if m and m.group(2) in SYMBOL_NAMES:
+            symbols[m.group(2)] = ORG_BASE + int(m.group(1), 16)
+    SYMBOLS.write_text(json.dumps(symbols, indent=2) + "\n")
+    print(f"[DNOS] Exported {len(symbols)} symbols -> {SYMBOLS.name}")
 
 
 def ensure_weights(python, force):

@@ -31,6 +31,9 @@ jobs:
       - name: Headless boot test (PM + VESA, no triple fault)
         run: python3 tools/boot_test.py --seconds 8
 
+      - name: Interactive differential test (law vs metal over QMP keystrokes)
+        run: python3 tools/interactive_test.py
+
       - name: Upload boot screenshot
         if: always()
         uses: actions/upload-artifact@v4

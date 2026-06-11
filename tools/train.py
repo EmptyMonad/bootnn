@@ -146,6 +146,23 @@ def generate_training_data():
         out = command_to_output(cmd)
         data.append((inp, out, desc))
 
+    # --- Single keys with random prior history (context robustness) ---
+    # In interactive use arbitrary keys precede every command, so each
+    # single-key mapping must hold regardless of history. Without these,
+    # the network is context-sensitive and misclassifies after the boot
+    # demo (e.g. 'b' → move_right). Seeded: data stays deterministic.
+    ctx_rng = np.random.default_rng(20260610)
+    history_pool = sorted({k for k, _, _ in single_keys}
+                          | {ord(c) for c in 'boxlinerectpixfilcsudwnghty'})
+    for key, cmd, desc in single_keys:
+        for v in range(16):
+            # Histories span the whole 32-event context window
+            hist_len = int(ctx_rng.integers(1, 32))
+            hist = [int(ctx_rng.choice(history_pool)) for _ in range(hist_len)]
+            inp = sequence_to_input([key] + hist)
+            out = command_to_output(cmd)
+            data.append((inp, out, f"{desc} +ctx{v}"))
+
     # --- Two-key sequences ---
     seqs = [
         ([ord('b'), ord('b')], CMD['rect'], "BB → rect"),

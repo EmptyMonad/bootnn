@@ -43,6 +43,27 @@ Move from "executing code" to "being the rule," on real hardware.
   exactly to `WEIGHT_BASE`. (Header *validation* — CRC/layer-size check at boot
   — is a planned hardening step, see below.)
 - ✅ **CI enforcement.** Train → build → headless boot test on every push.
+- ✅ **On-metal inference actually computes the law.** The forward pass used
+  one-operand `imul`, which clobbers EDX — the weight pointer — on the first
+  multiply-accumulate of every neuron, so the kernel computed garbage (every
+  output saturated, argmax always 0) while the simulator validated the
+  *intended* math. Fixed with two-operand `imul`. Verified live: kernel
+  `last_cmd` (read from guest memory over QMP) now equals
+  `simulate_assembly_forward` for the identical input history, key by key.
+- ✅ **Interactive differential test (was backlog #4).**
+  `tools/interactive_test.py` boots headless, feeds real PS/2 keystrokes over
+  QMP, reads the decoded command from guest memory (`dnos_symbols.json` is
+  exported at build time from the NASM listing), and asserts metal == law for
+  every key, plus that draw commands reach the framebuffer. Runs in CI.
+- ✅ **Cursor/decode fixes.** Cursor initializes to screen centre for the
+  active mode (it used to clamp into the status bar, which repaints every 16
+  ticks and erased everything drawn); the delta decode subtracts the sigmoid
+  midpoint (16384) so a trained zero delta no longer drifts the cursor
+  +16,+16 per inference; move_down/move_right now clamp; rect's right edge
+  uses width, not height.
+- ✅ **Context-robust single-key commands.** Single-key mappings are trained
+  under seeded random histories spanning the full 32-event window; the
+  network previously misclassified e.g. 'b' → move_right after the boot demo.
 - 📋 **True 32bpp video.** SeaBIOS offers only 24bpp VBE at 800×600, so the
   kernel falls back to VGA. Add a real 32bpp linear-framebuffer mode (Bochs
   DISPI) or native 24bpp drawing to restore high resolution.
@@ -86,10 +107,21 @@ falsifiable.
 1. 📋 32bpp VESA via Bochs DISPI (restore 800×600) **or** 24bpp drawing path.
 2. 📋 Boot-time header CRC + layer-size validation.
 3. 📋 Deterministic PIT-paced main loop.
-4. 📋 Interactive boot test: feed scripted keystrokes over QMP and assert the
-   framebuffer changes (prove `box`/`line`/`p` end-to-end, not just boot).
+4. ✅ ~~Interactive boot test~~ — done as a *differential* test: every
+   keystroke's decoded command is asserted equal to the simulator's
+   prediction for the same history (`tools/interactive_test.py`).
 5. 📋 Bitmap font for on-screen text.
 6. 📋 Tier 3 design doc (paging + weight streaming).
+7. 📋 **Generalization, not memorization.** With 43k weights and ~400
+   examples the network memorizes; under deep unseen histories some keys
+   still decode to the wrong command (the substrate faithfully computes a
+   law that is itself wrong). Drawing-board item for emergent neuromorphics:
+   train for context invariance explicitly (contrastive histories, dropout
+   on history slots, or an architectural attention split between slot 0 and
+   context), and quantify it with a held-out random-context eval set.
+8. 📋 Demo/test color state: the boot demo can leave color == background
+   (white on white), making correct draws invisible. Either pin the palette
+   for the demo or have the demo end with a canonical clear + color reset.
 
 ## How correctness is enforced
 

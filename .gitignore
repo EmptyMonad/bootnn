@@ -4,9 +4,15 @@ weights.bin
 weights_test*.bin
 qemu_debug.log
 qemu_int.log
+kbd_trace.log
 boot_screenshot.png
+shot_*.png
+dnos.lst
+dnos_symbols.json
+interactive_shots/
 ci_log*
 *.o
 
 # Rust build output
 target/
+__pycache__/

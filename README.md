@@ -29,7 +29,7 @@ Type `box` and the network draws a rectangle. Type `line` and it draws a line. P
 
 **Display:** the kernel uses a 32bpp VESA linear framebuffer when one is available and falls back to 320×200 VGA otherwise. (SeaBIOS exposes only a 24bpp VBE mode at 800×600, which the 32bpp-only drawing path declines — so under QEMU you currently get the clean VGA fallback.)
 
-**Verified:** training reaches 100% accuracy in both float and Q8.8, with bit-exact Python↔assembly agreement; weights are deterministic (seeded). A headless QEMU boot test runs in CI on every push and screenshots the framebuffer.
+**Verified:** training reaches 100% accuracy in both float and Q8.8, with bit-exact Python↔assembly agreement; weights are deterministic (seeded). CI runs two gates on every push: a headless QEMU boot test (screenshot + triple-fault scan), and a *differential* interactive test that feeds real PS/2 keystrokes over QMP and asserts the command the kernel decodes (read from guest memory) equals the simulator's prediction for the identical input history — the substrate provably computes its law on metal, not just in Python.
 
 ## Architecture
 
@@ -68,6 +68,7 @@ Physical World
 ├── tools/train.py        Training (quantization-aware, 100% Q8.8 accuracy, seeded)
 ├── tools/build.py        Cross-platform build: assemble + patch weights + pad
 ├── tools/boot_test.py    Headless QEMU smoke test (screenshot + fault check)
+├── tools/interactive_test.py  Differential test: QMP keystrokes, metal == law
 ├── Makefile              make && make run (Linux)
 ├── .github/workflows/    CI: train → build → boot test on every push
 │
