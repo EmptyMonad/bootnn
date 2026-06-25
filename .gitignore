@@ -11,9 +11,12 @@ dnos.lst
 dnos_symbols.json
 interactive_shots/
 ci_log*
+leakage.json
+leakage.tbl
 *.o
 
 # Rust build output
 target/
+Cargo.lock
 __pycache__/
 final_state.png

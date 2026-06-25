@@ -1,0 +1,20 @@
+[package]
+name = "dnos-pacp"
+version = "0.1.0"
+edition = "2021"
+description = "DNOS PAC-Privacy layer — calibrated, oracle-logged output perturbation (Privacy Track M1)"
+license = "Unlicense"
+repository = "https://github.com/emptymonad/dnos"
+
+[dependencies]
+# The NDAL is the one dependency: privacy noise is drawn through its Random
+# oracle so every sample is recorded in the replay log. That is what keeps
+# replay/verify bit-exact while a fresh observer cannot reconstruct.
+# No other external dependencies (std-only), matching the IAL/NDAL crates.
+dnos-ndal = { path = "../ndal" }
+
+[dev-dependencies]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

@@ -28,6 +28,14 @@ jobs:
       - name: Context-generalization eval (held-out random histories)
         run: python3 tools/context_eval.py --min-accuracy 95
 
+      - name: Privacy leakage eval (M0)
+        # Measures output leakage of private history; adds no noise. Non-gating
+        # by default (the tool exits 0 unless --max-history-bits is set), but a
+        # crash / self-check abort DOES fail the job — we want that surfaced.
+        # To turn it into a regression gate once a budget is chosen, add
+        # `--max-history-bits <bits>`; it will then fail the build on breach.
+        run: python3 tools/leakage_eval.py --json leakage.json --table leakage.tbl
+
       - name: Build image (assemble + patch weights + pad)
         run: python3 tools/build.py
 
@@ -43,4 +51,14 @@ jobs:
         with:
           name: boot-screenshot
           path: boot_screenshot.png
+          if-no-files-found: ignore
+
+      - name: Upload leakage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leakage-report
+          path: |
+            leakage.json
+            leakage.tbl
           if-no-files-found: ignore
