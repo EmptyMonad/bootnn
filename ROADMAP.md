@@ -75,6 +75,64 @@ Move from "executing code" to "being the rule," on real hardware.
   self-reference.
 - 📋 **Real font rendering.** `draw_text_simple` currently writes ASCII codes as
   pixel values; add a bitmap font so status/debug text is legible.
+- 📋 **IAL on metal.** The Input Abstraction Layer exists only as a host-side
+  Rust crate (`ial/`); the kernel still encodes raw scancodes directly
+  (`encode_input_32`). Port the minimal IAL (epoch-bin keystrokes, canonical
+  same-epoch sort) into the bootloader so on-metal input matches the
+  determinism contract the Rust layer already proves. (~50 lines asm.)
+- 📋 **Weight confidentiality (posture).** Weights ship in cleartext in every
+  image and are recoverable by black-box query (model extraction) — the "law"
+  is the secret, shipped in the open. Decide a posture: accept (public-domain
+  model), obfuscate (layout remap), or encrypt-at-rest + decrypt-on-load.
+  Independent of the privacy track below; tracked here as a security posture
+  call.
+
+## Privacy Track — PAC-Privacy layer 🚧 (cross-cutting)
+
+A privacy workstream that spans tiers rather than slotting into one. Grounded
+in **[PAC_PRIVACY_FEASIBILITY.md](docs/PAC_PRIVACY_FEASIBILITY.md)**.
+
+**The tension, stated honestly.** DNOS's north star is determinism +
+replayability + cross-node verification: the IAL/NDAL stack is engineered so a
+peer holding the replay log can reconstruct execution bit-for-bit. PAC-Privacy
+wants the opposite — to *bound* what an observer can reconstruct. These coexist
+exactly one way: every privacy-noise sample is drawn from the **NDAL Random
+oracle and recorded in the replay log**. Replay/verify stay bit-exact (the log
+de-noises); a fresh observer without the log cannot reconstruct. **Privacy is
+therefore conditional on who holds the log** — which makes the log itself a
+secret to be protected, separate from and orthogonal to the output-noise
+mechanism. PAC protects the screen/peer surface; it does **not** protect the
+log.
+
+Milestones (host-side unless noted):
+
+- 📋 **M0 — Measure leakage.** `tools/leakage_eval.py`: output covariance + MI
+  over resampled histories (extend `context_eval.py` with `np.cov`). No noise
+  yet — quantify how much the cursor-delta and command channels actually leak.
+  *Can start now; depends on nothing.*
+- 📋 **M1 — `pacp` crate.** Leakage Estimator + Privacy Risk Engine + Output
+  Perturbation. The command (argmax) channel stays exact; the cursor-delta
+  channel is noised via the NDAL oracle so replay is bit-exact and live differs.
+  Depends on M0 + NDAL.
+- 📋 **M2 — Reconstruction red-team.** State-reconstruction simulator as a CI
+  gate (adversary advantage ≤ target at the chosen budget), beside the existing
+  boot/differential tests. Depends on M1.
+- 📋 **M3 — Configurable budgets.** `PrivacyBudget` wired into `config_hash`
+  (so peers detect mismatched privacy settings), per-principal composition,
+  fail-closed on exhaustion. Depends on M1.
+- 📋 **M4 — Protect the log.** Orthogonal but mandatory for the guarantee to
+  mean anything: redact machine-fingerprint / RNG-seed oracle entries
+  (`BootTimestamp`, `CpuCount`, the seed), encrypt-at-rest, document the
+  peer-sharing policy. Parallel to M1–M3.
+- 🔬 **M5 — On-metal perturbation (Tier 3).** A minimal `perturb_output_32`
+  (RDTSC entropy + Q8.8 inverse-CDF noise LUT + logged draw), validated against
+  the host via the differential harness. **Blocked in Tier 2** — no entropy
+  source, no FPU, frozen weights; lands with the Tier 3 pager/daemon and the
+  deterministic tick loop.
+
+Dependency on existing items: M5 relies on the **deterministic PIT-paced main
+loop** (Phase 2 backlog #3) — that item is now a privacy prerequisite, not just
+a cleanliness win, so its priority rises accordingly.
 
 ## Phase 3 — Material synthesis & self-reference 🔬
 
@@ -126,6 +184,10 @@ falsifiable.
    (white on white), making correct draws invisible. Mostly mitigated by #7
    (the demo's untrained keys no longer fire fill/color chaos), but the
    palette should still be pinned for a canonical demo.
+9. 📋 IAL on metal: epoch-bin + canonical-sort keystrokes in the bootloader
+   so on-metal input matches the Rust IAL's determinism contract.
+10. 📋 Privacy M0: `tools/leakage_eval.py` (output covariance / MI) — first
+    step of the Privacy Track; see `docs/PAC_PRIVACY_FEASIBILITY.md`.
 
 ## How correctness is enforced
 
@@ -137,3 +199,4 @@ falsifiable.
 | Image builds | `tools/build.py` (assemble + patch + pad) |
 | Boots without faulting | `tools/boot_test.py` (headless QEMU, screenshot + triple-fault scan) |
 | All of the above, every push | `.github/workflows/ci.yml` |
+| Reconstruction risk bounded | Privacy red-team gate (planned, Privacy Track M2) |
