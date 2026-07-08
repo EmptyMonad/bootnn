@@ -101,6 +101,15 @@ Move from "executing code" to "being the rule," on real hardware.
   removed: 386/386 with 0% Q8.8 divergence, ≥95% held-out context
   generalization, boot, integrity (CRC over 1.8 MB, negative-tested),
   tick invariant, and law==metal differential — all passing.
+- 🚧 **Swarm (distributed phase).** Designed in `docs/SWARM_DESIGN.md`:
+  S0 deterministic replication (N nodes, one log, per-tick state digests
+  equal and == simulator — pure tooling, zero kernel changes), S1 an
+  IAL-token input surface over COM1 (humans and agents produce the same
+  replayable event stream; resolves Tier 3 OQ3), S2 a contribution
+  economy where verification is deterministic replay and the wallet is a
+  region of replicated state, S3 specialization + routing — the emergent
+  architecture, gated on 2 specialists + router beating an equal-weight
+  generalist. Scale *out*, not up.
 - 🔬 **Recursive boot / prehistory.** Formalize training ("prehistory") and boot
   ("birth") as one pipeline; snapshot/replay total state across cycles. The
   Rust IAL/NDAL layers already provide deterministic replay primitives to build
