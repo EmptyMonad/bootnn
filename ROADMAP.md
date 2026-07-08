@@ -64,17 +64,30 @@ Move from "executing code" to "being the rule," on real hardware.
 - ✅ **Context-robust single-key commands.** Single-key mappings are trained
   under seeded random histories spanning the full 32-event window; the
   network previously misclassified e.g. 'b' → move_right after the boot demo.
-- 📋 **True 32bpp video.** SeaBIOS offers only 24bpp VBE at 800×600, so the
-  kernel falls back to VGA. Add a real 32bpp linear-framebuffer mode (Bochs
-  DISPI) or native 24bpp drawing to restore high resolution.
-- 📋 **Boot-time header validation.** Read layer sizes from the header and
-  verify the CRC32 before inference — "don't mistake the map for the territory."
-- 📋 **Deterministic main loop ("tick").** Replace the busy-wait delay with a
-  fixed PIT-driven cycle so every inference is a clean state transition
-  `S(n+1) = f(S(n), input)` — the honest, implementable form of
-  self-reference.
-- 📋 **Real font rendering.** `draw_text_simple` currently writes ASCII codes as
-  pixel values; add a bitmap font so status/debug text is legible.
+- ✅ **True 32bpp video.** Bochs DISPI (QEMU stdvga / Bochs / VirtualBox)
+  programs 800×600×32 with a linear framebuffer directly via ports
+  0x1CE/0x1CF; the LFB physical base is discovered from PCI BAR0 (config
+  mechanism #1). Fallback chain is VBE 32bpp → DISPI → VGA 13h. Under QEMU
+  the kernel now runs at full resolution (`k_video_mode == 1`, asserted by
+  `tools/tick_test.py`).
+- ✅ **Boot-time header validation.** `validate_weights` checks magic, all
+  four layer sizes, the weight count, and the CRC32 of all 86,016 weight
+  bytes (nibble-table CRC-32, zlib polynomial) before any inference. On
+  mismatch: `hdr_status = 2`, screen painted red with "BAD WEIGHT CRC",
+  hard halt. `tools/integrity_test.py` proves both directions in CI —
+  pristine validates, a single flipped weight byte is rejected with the
+  tick counter frozen. The map is verified before it is trusted as
+  territory.
+- ✅ **Deterministic main loop ("tick").** The main loop blocks on the PIT
+  and performs exactly one state transition per tick, consuming at most one
+  input event per tick: `S(n+1) = f(S(n), input(n))` literally, not
+  approximately. Invariant `step_count <= tick_count` is exported and
+  asserted live by `tools/tick_test.py`, including under keystroke bursts
+  faster than the tick rate (ring buffer drains one event per tick).
+- ✅ **Real font rendering.** 8×8 bitmap font (0x20–0x5A), opaque glyph
+  cells, VGA and 32bpp paths. Banner, demo/interactive indicators, the
+  weight-rejection message, and a live status-bar telemetry line
+  (`C:cmd X:x Y:y T:tick` in hex) are all legible on screen.
 
 ## Phase 3 — Material synthesis & self-reference 🔬
 
@@ -104,14 +117,15 @@ falsifiable.
 
 ## Near-term backlog (next concrete steps)
 
-1. 📋 32bpp VESA via Bochs DISPI (restore 800×600) **or** 24bpp drawing path.
-2. 📋 Boot-time header CRC + layer-size validation.
-3. 📋 Deterministic PIT-paced main loop.
+1. ✅ ~~32bpp VESA via Bochs DISPI~~ — 800×600×32 restored under QEMU.
+2. ✅ ~~Boot-time header CRC + layer-size validation~~ — with a negative
+   test in CI (corrupted weights must be rejected).
+3. ✅ ~~Deterministic PIT-paced main loop~~ — invariant asserted on metal.
 4. ✅ ~~Interactive boot test~~ — done as a *differential* test: every
    keystroke's decoded command is asserted equal to the simulator's
    prediction for the same history (`tools/interactive_test.py`).
-5. 📋 Bitmap font for on-screen text.
-6. 📋 Tier 3 design doc (paging + weight streaming).
+5. ✅ ~~Bitmap font for on-screen text~~ — 8×8, both video paths.
+6. 🚧 Tier 3 design doc — see `docs/TIER3_DESIGN.md`.
 7. ✅ ~~Generalization, not memorization~~ — measured and solved.
    `tools/context_eval.py` scores single-key commands under held-out random
    histories (seeded, assembly-exact simulator): the frozen-augmentation
@@ -122,10 +136,9 @@ falsifiable.
    100% and zero Q8.8 divergence. CI gates at ≥95%. The differential
    interactive test confirms on metal: 12/12 keys law==metal, 9/9 draw
    commands visible.
-8. 📋 Demo/test color state: the boot demo can leave color == background
-   (white on white), making correct draws invisible. Mostly mitigated by #7
-   (the demo's untrained keys no longer fire fill/color chaos), but the
-   palette should still be pinned for a canonical demo.
+8. ✅ ~~Demo/test color state~~ — the pen color is pinned to white at the
+   end of the demo sequence; network-driven color drift during the demo can
+   no longer leave color == background for the interactive session.
 
 ## How correctness is enforced
 
@@ -136,4 +149,7 @@ falsifiable.
 | Reproducible weights | seeded RNG, stable CRC32 |
 | Image builds | `tools/build.py` (assemble + patch + pad) |
 | Boots without faulting | `tools/boot_test.py` (headless QEMU, screenshot + triple-fault scan) |
+| Corrupted weights are rejected | `tools/integrity_test.py` (CRC negative test, frozen-tick halt) |
+| One state transition per tick | `tools/tick_test.py` (`step_count <= tick_count`, burst drain) |
+| Determinism layers hold their contracts | `cargo test` on `ial/` and `ndal/` |
 | All of the above, every push | `.github/workflows/ci.yml` |

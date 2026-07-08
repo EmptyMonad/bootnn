@@ -48,6 +48,7 @@ ORG_BASE = 0x7C00             # whole image is org 0x7C00; phys = org + file off
 SYMBOL_NAMES = {
     "tick_count", "last_cmd", "last_confidence", "cursor_x", "cursor_y",
     "color_idx", "draw_size", "kb_read_idx", "kb_write_idx", "k_video_mode",
+    "last_tick", "step_count", "hdr_status",
 }
 
 # Fallback install locations (this machine + common defaults).

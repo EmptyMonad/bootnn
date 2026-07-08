@@ -37,6 +37,17 @@ jobs:
       - name: Interactive differential test (law vs metal over QMP keystrokes)
         run: python3 tools/interactive_test.py
 
+      - name: Weight-integrity test (pristine validates, corrupted is rejected)
+        run: python3 tools/integrity_test.py
+
+      - name: Deterministic-loop test (step_count <= tick_count, burst drain)
+        run: python3 tools/tick_test.py
+
+      - name: Rust determinism layers (IAL + NDAL)
+        run: |
+          cargo test --manifest-path ial/Cargo.toml
+          cargo test --manifest-path ndal/Cargo.toml
+
       - name: Upload boot screenshot
         if: always()
         uses: actions/upload-artifact@v4

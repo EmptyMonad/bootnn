@@ -42,7 +42,7 @@
 STAGE2_SECTORS  equ 4
 STAGE2_ADDR     equ 0x7E00
 STAGE2_LBA      equ 1           ; LBA of stage 2 (sector 0 = stage 1)
-KERNEL_SECTORS  equ 32          ; sectors to load (covers ~2.2KB code + margin)
+KERNEL_SECTORS  equ 48          ; sectors to load (code+font+CRC table; ceiling 61 before WEIGHT_BASE)
 KERNEL_ADDR     equ 0x8600      ; MUST equal linked pm_entry (org 0x7C00 + 0xA00)
 KERNEL_LBA      equ 5           ; LBA where the kernel image begins
 WEIGHTS_LBA     equ 69          ; LBA where the weight blob begins
@@ -244,6 +244,56 @@ dap_lba:    dd 0             ; LBA low 32
 ;---------------------------------------
 ; VESA Setup
 ;---------------------------------------
+%macro DISPI_W 2
+    mov dx, 0x1CE
+    mov ax, %1
+    out dx, ax
+    mov dx, 0x1CF
+    mov ax, %2
+    out dx, ax
+%endmacro
+
+;---------------------------------------
+; pci_find_vga - scan bus 0 for a display-class (0x03) device,
+; return EAX = BAR0 physical base (memory BAR, masked), or 0.
+; Config mechanism #1 via 0xCF8/0xCFC. 32-bit I/O is fine in RM on i386+.
+;---------------------------------------
+pci_find_vga:
+    push ebx
+    push edx
+    xor ebx, ebx             ; device 0..31, function 0
+.pf_dev:
+    mov eax, ebx
+    shl eax, 11
+    or eax, 0x80000008       ; class-code register
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    shr eax, 24
+    cmp al, 0x03             ; display controller
+    jne .pf_next
+    mov eax, ebx
+    shl eax, 11
+    or eax, 0x80000010       ; BAR0
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    test al, 1               ; must be a memory BAR
+    jnz .pf_next
+    and eax, 0xFFFFFFF0
+    jmp .pf_done
+.pf_next:
+    inc ebx
+    cmp ebx, 32
+    jb .pf_dev
+    xor eax, eax
+.pf_done:
+    pop edx
+    pop ebx
+    ret
+
 VESA_MODE_800x600x32 equ 0x4115
 
 setup_vesa:
@@ -294,6 +344,43 @@ setup_vesa:
     ret
 
 .vesa_fallback:
+    ;--- Bochs DISPI (QEMU stdvga / Bochs / VirtualBox) ---------------
+    ; SeaBIOS only offers 24bpp VBE at 800x600; the DISPI interface
+    ; gives us a true 32bpp linear framebuffer. Probe ID register.
+    mov dx, 0x1CE
+    xor ax, ax               ; VBE_DISPI_INDEX_ID
+    out dx, ax
+    mov dx, 0x1CF
+    in ax, dx
+    and ax, 0xFFF0
+    cmp ax, 0xB0C0
+    jne .vga_fallback
+
+    ; LFB physical base = BAR0 of the PCI display controller
+    call pci_find_vga
+    test eax, eax
+    jz .vga_fallback
+    mov [lfb_addr], eax
+
+    ; Program 800x600x32 with LFB enabled
+    DISPI_W 4, 0x0000        ; ENABLE   <- disabled while reprogramming
+    DISPI_W 1, 800           ; XRES
+    DISPI_W 2, 600           ; YRES
+    DISPI_W 3, 32            ; BPP
+    DISPI_W 6, 800           ; VIRT_WIDTH -> pitch = 800*4
+    DISPI_W 8, 0             ; X_OFFSET
+    DISPI_W 9, 0             ; Y_OFFSET
+    DISPI_W 4, 0x0041        ; ENABLE | LFB_ENABLED
+
+    mov word [scr_width], 800
+    mov word [scr_height], 600
+    mov byte [scr_bpp], 32
+    mov word [scr_pitch], 3200
+    mov byte [video_mode], 1
+    popa
+    ret
+
+.vga_fallback:
     ; Fall back to VGA mode 13h (320x200x8bpp)
     mov ax, 0x0013
     int 0x10
@@ -512,6 +599,10 @@ pm_entry:
     mov eax, [k_scr_height]
     shr eax, 1
     mov [cursor_y], eax
+
+    ; Validate the weight blob before trusting it as law:
+    ; magic, layer sizes, weight count, CRC32 over all 86,016 bytes.
+    call validate_weights
 
     ; Set up IDT
     call setup_idt
@@ -745,10 +836,10 @@ demo_sequence:
 
     ; Display "DEMO" indicator
     mov esi, msg_demo
-    mov edi, [k_lfb_addr]
-    add edi, 20              ; Offset 20 pixels
-    mov ecx, 4               ; 4 chars
-    call draw_text_simple
+    mov ecx, 4
+    mov eax, 80
+    mov ebx, 4
+    call draw_text
 
     ; Feed a sequence of synthetic keypresses through the network
     ; This simulates: p, b, o, x, l, i, n, e
@@ -768,6 +859,7 @@ demo_sequence:
 
     ; Decode and execute the output
     call decode_output_32
+    inc dword [step_count]
 
     ; Brief delay (wait ~5 timer ticks = 50ms)
     mov eax, [tick_count]
@@ -781,12 +873,16 @@ demo_sequence:
     inc esi
     loop .demo_loop
 
-    ; Clear demo indicator
+    ; Pin the pen color to a canonical value: the demo's network-driven
+    ; color changes must not leave color == background (invisible draws).
+    mov byte [color_idx], 15
+
+    ; Switch indicator
     mov esi, msg_interactive
-    mov edi, [k_lfb_addr]
-    add edi, 20
     mov ecx, 11
-    call draw_text_simple
+    mov eax, 80
+    mov ebx, 4
+    call draw_text
 
     popad
     ret
@@ -800,7 +896,20 @@ msg_interactive: db 'INTERACTIVE'
 ;===============================================================================
 
 main_loop:
-    ; Poll keyboard buffer
+    ;--- Deterministic tick pacing -------------------------------------
+    ; Block until the PIT advances, then perform exactly one state
+    ; transition: S(n+1) = f(S(n), input(n)), consuming at most ONE
+    ; input event per tick. step_count <= tick_count is an invariant.
+    mov eax, [last_tick]
+.tick_wait:
+    hlt
+    cmp eax, [tick_count]
+    je .tick_wait
+    mov eax, [tick_count]
+    mov [last_tick], eax
+    inc dword [step_count]
+
+    ; Consume at most one buffered keyboard event this tick
     call read_key
     test al, al
     jz .no_input
@@ -839,8 +948,7 @@ main_loop:
     call draw_status_bar
 .no_status:
 
-    hlt                      ; Wait for next interrupt
-    jmp main_loop
+    jmp main_loop            ; pacing hlt is at the top of the loop
 
 .halt:
     pop eax
@@ -1461,12 +1569,11 @@ draw_cursor:
 ; Draw boot banner
 draw_banner:
     pushad
-    ; Simple: write "DNOS T2" at top of screen
     mov esi, msg_banner
-    mov edi, [k_lfb_addr]
-    add edi, 8               ; Small offset
     mov ecx, 7
-    call draw_text_simple
+    mov eax, 4
+    mov ebx, 4
+    call draw_text
     popad
     ret
 
@@ -1491,6 +1598,7 @@ draw_status_bar:
     mov ecx, 320 * 16 / 4
     mov eax, 0x07070707      ; Gray
     rep stosd
+    call draw_status_text
     popad
     ret
 
@@ -1510,49 +1618,313 @@ draw_status_bar:
     add edi, [k_scr_pitch]
     dec edx
     jnz .sb_vesa_row
+    call draw_status_text
     popad
     ret
 
-; Simple text drawing — writes bytes directly as pixel values
-; Not real font rendering, just proves text path works
-; ESI=string, EDI=LFB position, ECX=length
-draw_text_simple:
+; Telemetry line rendered into the status bar:
+;   C:cc X:xxxx Y:yyyy T:tttttttt   (all hex)
+draw_status_text:
     pushad
+    mov ebx, [k_scr_height]
+    sub ebx, 12              ; text baseline inside the bar
 
-    cmp byte [k_video_mode], 1
-    je .dt_vesa
+    mov esi, str_c
+    mov ecx, 2
+    mov eax, 4
+    call draw_text
+    mov edx, [last_cmd]
+    mov ecx, 2
+    mov eax, 4 + 2*8
+    call draw_hex32
 
-    ; VGA: just write ASCII codes as pixel values (visible as colored dots)
-.dt_vga:
-    lodsb
-    mov [edi], al
-    inc edi
-    loop .dt_vga
-    popad
-    ret
+    mov esi, str_x
+    mov ecx, 3
+    mov eax, 4 + 4*8
+    call draw_text
+    mov edx, [cursor_x]
+    mov ecx, 4
+    mov eax, 4 + 7*8
+    call draw_hex32
 
-.dt_vesa:
-    ; VESA: write white-on-dark character markers
-    ; Each char = 8-pixel-wide block with brightness = ASCII code
-.dt_vesa_char:
-    lodsb
-    movzx eax, al
-    ; Make it white text: 0x00FFFFFF for any non-zero char
-    test eax, eax
-    jz .dt_vesa_skip
-    mov eax, 0x00FFFFFF
-.dt_vesa_skip:
-    ; Write 8 pixels wide
-    push ecx
+    mov esi, str_y
+    mov ecx, 3
+    mov eax, 4 + 11*8
+    call draw_text
+    mov edx, [cursor_y]
+    mov ecx, 4
+    mov eax, 4 + 14*8
+    call draw_hex32
+
+    mov esi, str_t
+    mov ecx, 3
+    mov eax, 4 + 18*8
+    call draw_text
+    mov edx, [tick_count]
     mov ecx, 8
-.dt_px:
-    mov [edi], eax
-    add edi, 4
-    loop .dt_px
-    pop ecx
-    loop .dt_vesa_char
+    mov eax, 4 + 21*8
+    call draw_hex32
+
     popad
     ret
+
+str_c: db 'C:'
+str_x: db ' X:'
+str_y: db ' Y:'
+str_t: db ' T:'
+
+;---------------------------------------
+; draw_char — render one opaque 8x8 glyph (white on black)
+;   DL = ASCII (0x20..0x5A rendered; others blank), EAX = x, EBX = y
+;---------------------------------------
+draw_char:
+    pushad
+    call pixel_offset        ; EDI = fb ptr for (x,y)
+    movzx esi, dl
+    sub esi, 0x20
+    cmp esi, 0x5A - 0x20
+    jbe .dc_have
+    xor esi, esi             ; out of range -> space
+.dc_have:
+    shl esi, 3
+    add esi, font8x8
+    mov ecx, 8               ; rows
+.dc_row:
+    mov dl, [esi]
+    inc esi
+    push edi
+    mov ebp, 8               ; cols
+.dc_col:
+    cmp byte [k_video_mode], 1
+    je .dc_vesa_px
+    ; VGA 8bpp
+    test dl, 0x80
+    jz .dc_vga_bg
+    mov byte [edi], 15
+    jmp .dc_vga_adv
+.dc_vga_bg:
+    mov byte [edi], 0
+.dc_vga_adv:
+    inc edi
+    jmp .dc_next
+.dc_vesa_px:
+    test dl, 0x80
+    jz .dc_vesa_bg
+    mov dword [edi], 0x00FFFFFF
+    jmp .dc_vesa_adv
+.dc_vesa_bg:
+    mov dword [edi], 0x00000000
+.dc_vesa_adv:
+    add edi, 4
+.dc_next:
+    shl dl, 1
+    dec ebp
+    jnz .dc_col
+    pop edi
+    cmp byte [k_video_mode], 1
+    je .dc_pitch_vesa
+    add edi, 320
+    jmp .dc_row_next
+.dc_pitch_vesa:
+    add edi, [k_scr_pitch]
+.dc_row_next:
+    loop .dc_row
+    popad
+    ret
+
+;---------------------------------------
+; draw_text — ESI = string, ECX = length, EAX = x, EBX = y
+;---------------------------------------
+draw_text:
+    pushad
+.dt_loop:
+    mov dl, [esi]
+    call draw_char
+    inc esi
+    add eax, 8
+    loop .dt_loop
+    popad
+    ret
+
+;---------------------------------------
+; draw_hex32 — EDX = value, ECX = digit count (1..8), EAX = x, EBX = y
+;---------------------------------------
+draw_hex32:
+    pushad
+    mov ebp, edx
+.dh_loop:
+    push ecx
+    dec ecx
+    shl ecx, 2               ; (digits remaining - 1) * 4
+    mov edi, ebp
+    shr edi, cl
+    pop ecx
+    and edi, 0x0F
+    mov dl, [hex_chars + edi]
+    call draw_char
+    add eax, 8
+    loop .dh_loop
+    popad
+    ret
+
+hex_chars: db '0123456789ABCDEF'
+
+; 8x8 bitmap font, chars 0x20..0x5A (glyph = char - 0x20), MSB = left pixel
+font8x8:
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; ' '
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '!'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '"'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '#'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '$'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '%'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '&'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '''
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '('
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; ')'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '*'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '+'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; ','
+    db 0x00, 0x00, 0x00, 0x7C, 0x00, 0x00, 0x00, 0x00   ; '-'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x00   ; '.'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '/'
+    db 0x7C, 0xC6, 0xCE, 0xD6, 0xE6, 0xC6, 0x7C, 0x00   ; '0'
+    db 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00   ; '1'
+    db 0x7C, 0xC6, 0x06, 0x1C, 0x30, 0x60, 0xFE, 0x00   ; '2'
+    db 0x7C, 0xC6, 0x06, 0x3C, 0x06, 0xC6, 0x7C, 0x00   ; '3'
+    db 0x0C, 0x1C, 0x3C, 0x6C, 0xFE, 0x0C, 0x0C, 0x00   ; '4'
+    db 0xFE, 0xC0, 0xFC, 0x06, 0x06, 0xC6, 0x7C, 0x00   ; '5'
+    db 0x3C, 0x60, 0xC0, 0xFC, 0xC6, 0xC6, 0x7C, 0x00   ; '6'
+    db 0xFE, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00   ; '7'
+    db 0x7C, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0x7C, 0x00   ; '8'
+    db 0x7C, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0x78, 0x00   ; '9'
+    db 0x00, 0x60, 0x60, 0x00, 0x60, 0x60, 0x00, 0x00   ; ':'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; ';'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '<'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '='
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '>'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '?'
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   ; '@'
+    db 0x38, 0x6C, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0x00   ; 'A'
+    db 0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xFC, 0x00   ; 'B'
+    db 0x7C, 0xC6, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00   ; 'C'
+    db 0xF8, 0xCC, 0xC6, 0xC6, 0xC6, 0xCC, 0xF8, 0x00   ; 'D'
+    db 0xFE, 0xC0, 0xC0, 0xF8, 0xC0, 0xC0, 0xFE, 0x00   ; 'E'
+    db 0xFE, 0xC0, 0xC0, 0xF8, 0xC0, 0xC0, 0xC0, 0x00   ; 'F'
+    db 0x7C, 0xC6, 0xC0, 0xDE, 0xC6, 0xC6, 0x7C, 0x00   ; 'G'
+    db 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0x00   ; 'H'
+    db 0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00   ; 'I'
+    db 0x3E, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0x78, 0x00   ; 'J'
+    db 0xC6, 0xCC, 0xD8, 0xF0, 0xD8, 0xCC, 0xC6, 0x00   ; 'K'
+    db 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xFE, 0x00   ; 'L'
+    db 0xC6, 0xEE, 0xFE, 0xD6, 0xC6, 0xC6, 0xC6, 0x00   ; 'M'
+    db 0xC6, 0xE6, 0xF6, 0xDE, 0xCE, 0xC6, 0xC6, 0x00   ; 'N'
+    db 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00   ; 'O'
+    db 0xFC, 0xC6, 0xC6, 0xFC, 0xC0, 0xC0, 0xC0, 0x00   ; 'P'
+    db 0x7C, 0xC6, 0xC6, 0xC6, 0xD6, 0xCC, 0x7A, 0x00   ; 'Q'
+    db 0xFC, 0xC6, 0xC6, 0xFC, 0xD8, 0xCC, 0xC6, 0x00   ; 'R'
+    db 0x7C, 0xC6, 0xC0, 0x7C, 0x06, 0xC6, 0x7C, 0x00   ; 'S'
+    db 0xFC, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00   ; 'T'
+    db 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00   ; 'U'
+    db 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00   ; 'V'
+    db 0xC6, 0xC6, 0xC6, 0xD6, 0xFE, 0xEE, 0xC6, 0x00   ; 'W'
+    db 0xC6, 0x6C, 0x38, 0x38, 0x38, 0x6C, 0xC6, 0x00   ; 'X'
+    db 0xC6, 0xC6, 0x6C, 0x38, 0x18, 0x18, 0x18, 0x00   ; 'Y'
+    db 0xFE, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0xFE, 0x00   ; 'Z'
+
+;---------------------------------------
+; crc32_region — ESI = start, ECX = length -> EAX = CRC32 (zlib polynomial)
+; Reflected CRC-32, nibble-table driven: matches Python zlib.crc32.
+;---------------------------------------
+crc32_region:
+    push ebx
+    push ecx
+    push edx
+    push esi
+    mov eax, 0xFFFFFFFF
+.cr_byte:
+    movzx ebx, byte [esi]
+    xor eax, ebx
+    mov ebx, eax
+    and ebx, 0x0F
+    shr eax, 4
+    xor eax, [crc32_tab + ebx*4]
+    mov ebx, eax
+    and ebx, 0x0F
+    shr eax, 4
+    xor eax, [crc32_tab + ebx*4]
+    inc esi
+    dec ecx
+    jnz .cr_byte
+    xor eax, 0xFFFFFFFF
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+align 4
+crc32_tab:
+    dd 0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC
+    dd 0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C
+    dd 0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C
+    dd 0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C
+
+;---------------------------------------
+; validate_weights — don't mistake the map for the territory.
+; Verifies magic, layer sizes, weight count, and CRC32 of all
+; 86,016 weight bytes against the trained header. On failure:
+; hdr_status = 2, screen painted red, message drawn, hard halt.
+;---------------------------------------
+validate_weights:
+    pushad
+    cmp word [WEIGHT_BASE], 0x4E44           ; 'D','N' little-endian
+    jne .vw_bad
+    cmp word [WEIGHT_BASE + 5], NET_INPUT
+    jne .vw_bad
+    cmp word [WEIGHT_BASE + 7], NET_HIDDEN1
+    jne .vw_bad
+    cmp word [WEIGHT_BASE + 9], NET_HIDDEN2
+    jne .vw_bad
+    cmp word [WEIGHT_BASE + 11], NET_OUTPUT
+    jne .vw_bad
+    cmp dword [WEIGHT_BASE + 16], 43008
+    jne .vw_bad
+    mov esi, WEIGHT_BASE + W_HEADER
+    mov ecx, 43008 * 2
+    call crc32_region
+    cmp eax, [WEIGHT_BASE + 21]
+    jne .vw_bad
+    mov dword [hdr_status], 1
+    popad
+    ret
+
+.vw_bad:
+    mov dword [hdr_status], 2
+    mov edi, [k_lfb_addr]
+    cmp byte [k_video_mode], 1
+    je .vw_red_vesa
+    mov ecx, 320 * 200 / 4
+    mov eax, 0x04040404                      ; VGA palette 4 = red
+    rep stosd
+    jmp .vw_msg
+.vw_red_vesa:
+    mov ecx, [k_scr_pitch]
+    imul ecx, [k_scr_height]
+    shr ecx, 2
+    mov eax, 0x00AA0000
+    rep stosd
+.vw_msg:
+    mov esi, msg_bad_weights
+    mov ecx, 14
+    mov eax, 8
+    mov ebx, 8
+    call draw_text
+    cli
+.vw_halt:
+    hlt
+    jmp .vw_halt
+
+msg_bad_weights: db 'BAD WEIGHT CRC'
 
 ;===============================================================================
 ; KERNEL DATA
@@ -1576,10 +1948,17 @@ last_confidence: dd 0
 kb_read_idx:    dw 0
 kb_write_idx:   dw 0
 
+last_tick:      dd 0            ; tick consumed by the last main-loop step
+step_count:     dd 0            ; state transitions performed (<= tick_count)
+hdr_status:     dd 0            ; 0=unchecked, 1=weights valid, 2=REJECTED
+
 ;===============================================================================
 ; Pad kernel to exactly 32KB (64 sectors)
 ;===============================================================================
 
+; Guard: code+data must fit inside the KERNEL_SECTORS load window
+; (negative TIMES here = assembly error = the honest failure mode).
+times (2560 + KERNEL_SECTORS * 512) - ($ - boot_entry) db 0
 times (2560 + 32768) - ($ - boot_entry) db 0
 
 ;===============================================================================
