@@ -49,6 +49,9 @@ jobs:
       - name: Serial differential test (S1 - keyboard and wire are one interface)
         run: python3 tools/serial_test.py
 
+      - name: Client record/replay test (S1 - the log IS the session)
+        run: python3 tools/client_test.py
+
       - name: Rust determinism layers (IAL + NDAL)
         run: |
           cargo test --manifest-path ial/Cargo.toml

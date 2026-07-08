@@ -11,6 +11,7 @@ dnos.lst
 dnos_symbols.json
 interactive_shots/
 swarm_shots/
+sessions/
 ci_log*
 *.o
 

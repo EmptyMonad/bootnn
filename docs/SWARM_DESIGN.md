@@ -75,6 +75,11 @@ nothing downstream survives; if they don't, replication is free forever.
 > node fed the same semantic log occupy identical states (state
 > vector, framebuffer digest, ring indexes), each matching the law,
 > with provenance proven by `serial_rx_count`.
+> Thin client: **landed** (`tools/dnos_client.py`) — human terminal
+> and agent pipe over the same wire; sessions are event logs with
+> recorded final state; `--replay` verifies bit-identical
+> reconstruction (`tools/client_test.py`, in CI). v1 framing is
+> deliberately blocked on `docs/TIER4_DESIGN.md` OQ1.
 
 PS/2 scancodes stop being the input; they become one *producer* of the
 input. The wire format is the **IAL token**: an 8-byte frame = 8 input

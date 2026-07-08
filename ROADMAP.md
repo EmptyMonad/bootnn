@@ -114,8 +114,14 @@ Move from "executing code" to "being the rule," on real hardware.
   `tools/serial_test.py` proves a PS/2-driven node and a wire-driven
   node fed the same semantic log occupy identical states — humans and
   agents are peers above one deterministic interface, executable form.
-  Remaining: versioned 8-byte IAL token framing (Tier 3 OQ3), thin host
-  client. Then: S2 a contribution
+  ✅ **S1 thin client** — `tools/dnos_client.py`: interactive terminal
+  for humans, `--send`/`--stdin` for agents, all over the same COM1
+  wire; every session is an event log with a recorded final state, and
+  `--replay` re-executes the log and verifies bit-identical state
+  (`tools/client_test.py`, in CI: "the log IS the session").
+  Remaining: versioned 8-byte IAL token framing — **deliberately
+  blocked on TIER4_DESIGN OQ1** (the frame carries whatever the Tier 4
+  encoder consumes; do not design it twice). Then: S2 a contribution
   economy where verification is deterministic replay and the wallet is a
   region of replicated state, S3 specialization + routing — the emergent
   architecture, gated on 2 specialists + router beating an equal-weight
@@ -142,7 +148,40 @@ falsifiable.
 
 ---
 
-## Near-term backlog (next concrete steps)
+## Work queue (self-contained: "continue the DNOS roadmap" resumes here)
+
+Each item is specified well enough to implement without this
+conversation. Order is deliberate.
+
+1. 📋 **Tier 4 Part A — ternary weights** (`docs/TIER4_DESIGN.md`,
+   Part A): same topology, {-1,0,+1} 2-bit packed weights, per-layer
+   power-of-two scales, `train.py --ternary` with STE, packed-walk
+   inner loop (add/sub/skip — no `imul` in inference), header v4a,
+   integrity negative tests for the packed format. Smallest diff that
+   retires multiply. Gauntlet green before touching Part B.
+2. 📋 **Tier 4 Part B — diagonal SSM core** (TIER4_DESIGN, Part B):
+   resolve OQ1 (event unit) FIRST — it fixes the S1 v1 token frame;
+   then `h` (512×int16, `h_base` exported, in the swarm digest),
+   decay spectrum `λ = 1-2^-k`, delete the history window, stateful
+   simulator, streaming generalization eval.
+3. 📋 **S1 v1 — versioned IAL token framing** (unblocked by item 2):
+   frame = version byte + the Tier 4 event features; kernel framer on
+   COM1; `dnos_client.py` and the Rust IAL emit it; serial_test
+   extended to frame level.
+4. 📋 **S2 — contribution log + mint prototype** (SWARM_DESIGN, S2):
+   host-side first. Merkle-chained JSONL event log; contribution tuple
+   `(base_crc, dataset_delta, hyperparams, seed, claimed_crc)`;
+   verifier that replays training and accepts/rejects; wallet as a
+   deterministic fold over the log. No blockchain, no kernel changes.
+5. 📋 **S3 spike — two specialists + a router** (SWARM_DESIGN, S3):
+   train two blobs on disjoint command subsets, host-side router,
+   measure against one equal-weight generalist. Falsifies (or funds)
+   the emergent-architecture claim at N=2.
+6. 🔬 **Intent compiler prototype** (host-side, after S1 v1): NL
+   interview → canonical config event log → deterministic client/shell
+   configuration; the conversation is ephemeral, the log is law.
+
+## Completed backlog (Tier 2/3 era)
 
 1. ✅ ~~32bpp VESA via Bochs DISPI~~ — 800×600×32 restored under QEMU.
 2. ✅ ~~Boot-time header CRC + layer-size validation~~ — with a negative
