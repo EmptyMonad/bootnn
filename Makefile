@@ -1,5 +1,5 @@
 #===============================================================================
-# DNOS Tier 2 — Unified Makefile
+# DNOS Tier 3 — Unified Makefile
 #
 # Targets:
 #   make          — Build dnos.img (assemble + train + patch weights)
@@ -41,7 +41,7 @@ QEMU_FLAGS := -m 16M -serial stdio
 all: $(IMAGE)
 	@echo ""
 	@echo "╔══════════════════════════════════════════╗"
-	@echo "║  DNOS Tier 2 — Build Complete            ║"
+	@echo "║  DNOS Tier 3 — Build Complete            ║"
 	@echo "║  Image: $(IMAGE) ($$(wc -c < $(IMAGE)) bytes)  ║"
 	@echo "║  Run:   make run                         ║"
 	@echo "╚══════════════════════════════════════════╝"
@@ -52,8 +52,8 @@ $(IMAGE): $(ASM_SRC) $(WEIGHTS)
 	$(ASM) -f bin $(ASM_SRC) -o $(IMAGE)
 	@echo "[DNOS] Patching weights at sector $(WEIGHT_SECTOR)..."
 	$(DD) if=$(WEIGHTS) of=$(IMAGE) bs=512 seek=$(WEIGHT_SECTOR) conv=notrunc 2>/dev/null
-	@echo "[DNOS] Padding to floppy size..."
-	truncate -s 1474560 $(IMAGE) 2>/dev/null || true
+	@echo "[DNOS] Padding image to 2 MB..."
+	truncate -s 2097152 $(IMAGE) 2>/dev/null || true
 	@echo "[DNOS] Build complete: $(IMAGE)"
 
 #--- Train weights ---
@@ -71,12 +71,12 @@ validate: $(WEIGHTS)
 #--- Run in QEMU ---
 run: $(IMAGE)
 	@echo "[DNOS] Starting QEMU..."
-	$(QEMU) -fda $(IMAGE) $(QEMU_FLAGS)
+	$(QEMU) -drive file=$(IMAGE),format=raw $(QEMU_FLAGS)
 
 #--- Quick test: build + run with serial debug ---
 test: $(IMAGE)
 	@echo "[DNOS] Testing with serial output..."
-	$(QEMU) -fda $(IMAGE) $(QEMU_FLAGS) -no-reboot -d int 2>qemu_debug.log &
+	$(QEMU) -drive file=$(IMAGE),format=raw $(QEMU_FLAGS) -no-reboot -d int 2>qemu_debug.log &
 	@echo "[DNOS] QEMU PID: $$!"
 	@echo "[DNOS] Debug log: qemu_debug.log"
 
@@ -87,7 +87,7 @@ clean:
 
 #--- Help ---
 help:
-	@echo "DNOS Tier 2 Build System"
+	@echo "DNOS Tier 3 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  make          Build dnos.img (assemble + train + patch)"

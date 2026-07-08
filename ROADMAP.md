@@ -91,8 +91,16 @@ Move from "executing code" to "being the rule," on real hardware.
 
 ## Phase 3 — Material synthesis & self-reference 🔬
 
-- 🔬 **Tier 3 (~1M weights).** Paging + on-disk weight swap so the network
-  exceeds low memory. Requires a pager and a streaming forward pass.
+- ✅ **Tier 3 (942,080 weights).** Implemented per `docs/TIER3_DESIGN.md`
+  Strategy A: the full 1.8 MB blob is lifted to 0x200000 at boot
+  (INT 13h → bounce buffer → unreal-mode copy) and inference runs from
+  high memory with no disk in the loop — paging was explicitly rejected
+  because cache-dependent inference latency would bend tick determinism.
+  Topology 512→1024→384→64, 64-event context window, PIT at 20 Hz
+  (the measured single-transition budget). Every CI gate extended, none
+  removed: 386/386 with 0% Q8.8 divergence, ≥95% held-out context
+  generalization, boot, integrity (CRC over 1.8 MB, negative-tested),
+  tick invariant, and law==metal differential — all passing.
 - 🔬 **Recursive boot / prehistory.** Formalize training ("prehistory") and boot
   ("birth") as one pipeline; snapshot/replay total state across cycles. The
   Rust IAL/NDAL layers already provide deterministic replay primitives to build
@@ -125,7 +133,7 @@ falsifiable.
    keystroke's decoded command is asserted equal to the simulator's
    prediction for the same history (`tools/interactive_test.py`).
 5. ✅ ~~Bitmap font for on-screen text~~ — 8×8, both video paths.
-6. 🚧 Tier 3 design doc — see `docs/TIER3_DESIGN.md`.
+6. ✅ ~~Tier 3 design doc~~ — `docs/TIER3_DESIGN.md`, implemented as designed.
 7. ✅ ~~Generalization, not memorization~~ — measured and solved.
    `tools/context_eval.py` scores single-key commands under held-out random
    histories (seeded, assembly-exact simulator): the frozen-augmentation

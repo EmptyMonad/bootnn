@@ -23,22 +23,22 @@ python tools/build.py --run      # train + assemble + patch + boot in QEMU
 
 ## What Happens
 
-DNOS boots from a hard-disk image — stage 1 → stage 2 (16-bit) → 32-bit protected mode, using INT 13h LBA reads (no CHS geometry limits). It loads 43,008 trained weights into memory and enters a loop: keyboard input → neural forward pass → screen output. On first boot, a demo sequence feeds synthetic keypresses through the network to prove the substrate is alive.
+DNOS boots from a hard-disk image — stage 1 → stage 2 (16-bit) → 32-bit protected mode, using INT 13h LBA reads (no CHS geometry limits). Stage 2 lifts the 1.8 MB weight blob above the 1 MB line (INT 13h → 32 KB bounce buffer → unreal-mode copy to 0x200000), validates nothing yet — that's the kernel's job — and switches to protected mode. The kernel then verifies the blob's magic, layer sizes, weight count, and CRC32 over all 1,884,160 weight bytes before a single inference runs; corrupted weights get a red screen, "BAD WEIGHT CRC", and a hard halt. Only a verified law is allowed to govern. Then: keyboard input → neural forward pass (942,080 weights) → screen output, exactly one state transition per PIT tick. On first boot, a demo sequence feeds synthetic keypresses through the network to prove the substrate is alive.
 
 Type `box` and the network draws a rectangle. Type `line` and it draws a line. Press `p` for a pixel. The network learned these mappings during offline training — the assembly code contains no `if key == 'b' then draw_rect` logic. It's weights all the way down.
 
-**Display:** the kernel uses a 32bpp VESA linear framebuffer when one is available and falls back to 320×200 VGA otherwise. (SeaBIOS exposes only a 24bpp VBE mode at 800×600, which the 32bpp-only drawing path declines — so under QEMU you currently get the clean VGA fallback.)
+**Display:** true 800×600×32. The fallback chain is VBE 32bpp → Bochs DISPI (ports 0x1CE/0x1CF, LFB base discovered from PCI BAR0) → 320×200 VGA. SeaBIOS only offers 24bpp VBE, so under QEMU the DISPI path delivers the full-resolution linear framebuffer. On-screen text (banner, mode indicator, status-bar telemetry) renders through a real 8×8 bitmap font on both video paths.
 
-**Verified:** training reaches 100% accuracy in both float and Q8.8, with bit-exact Python↔assembly agreement; weights are deterministic (seeded). Commands also hold under *held-out* random input histories (100% on `tools/context_eval.py`; the network trains on resampled history contexts, so the mapping generalizes instead of memorizing). CI runs three gates on every push: the context-generalization eval, a headless QEMU boot test (screenshot + triple-fault scan), and a *differential* interactive test that feeds real PS/2 keystrokes over QMP and asserts the command the kernel decodes (read from guest memory) equals the simulator's prediction for the identical input history — the substrate provably computes its law on metal, not just in Python.
+**Verified:** training reaches 100% accuracy in both float and Q8.8, with bit-exact Python↔assembly agreement; weights are deterministic (seeded) and CRC-stamped. Commands also hold under *held-out* random input histories (`tools/context_eval.py`, gated ≥95%; the network trains on resampled history contexts, so the mapping generalizes instead of memorizing). CI runs seven gates on every push: the context-generalization eval; a headless QEMU boot test (screenshot + triple-fault scan); a *differential* interactive test that feeds real PS/2 keystrokes over QMP and asserts the command the kernel decodes (read from guest memory) equals the simulator's prediction for the identical input history; a weight-integrity test proving a single corrupted weight byte is rejected at boot with the tick counter frozen; a deterministic-loop test asserting `step_count <= tick_count` live, including under keystroke bursts; and `cargo test` on both Rust determinism layers. The substrate provably computes its law on metal — and refuses to compute a law it can't verify.
 
 ## Architecture
 
 ```
 Keyboard ──→ Input History ──→ Neural Network ──→ Decode ──→ VGA/VESA
-  (IRQ1)      (32 events)    (256→128→64→32)    (argmax)   (framebuffer)
+  (IRQ1)      (64 events)   (512→1024→384→64)   (argmax)   (framebuffer)
 ```
 
-The kernel is three things: a boot sequence, a neural forward pass in Q8.8 fixed-point, and graphics primitives. Everything else — what keystrokes mean, what to draw, how to respond — is in the weights.
+The kernel is three things: a boot sequence, a neural forward pass in Q8.8 fixed-point (942,080 weights, ~1.8 MB, resident above the 1 MB line), and graphics primitives. The main loop is PIT-paced: it blocks on the timer and performs exactly one state transition per tick, consuming at most one input event per tick — `S(n+1) = f(S(n), input(n))` literally. The tick (20 Hz) is the measured budget for one full Tier 3 forward pass; determinism is rate-independent. Everything else — what keystrokes mean, what to draw, how to respond — is in the weights.
 
 ### Determinism Layers
 

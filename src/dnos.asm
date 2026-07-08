@@ -46,6 +46,8 @@ KERNEL_SECTORS  equ 48          ; sectors to load (code+font+CRC table; ceiling 
 KERNEL_ADDR     equ 0x8600      ; MUST equal linked pm_entry (org 0x7C00 + 0xA00)
 KERNEL_LBA      equ 5           ; LBA where the kernel image begins
 WEIGHTS_LBA     equ 69          ; LBA where the weight blob begins
+WEIGHT_SECTORS  equ 3681        ; 128 B header + 1,884,160 B weights, sector-aligned
+CHUNK_SECTORS   equ 64          ; 32 KB per INT 13h read into the bounce buffer
 
 boot_entry:
     cli
@@ -143,15 +145,16 @@ stage2_entry:
     ; of overlapping it. Uses INT 13h AH=42h (LBA), so no CHS limits.
     call load_kernel
 
-    ;--- Load weights via LBA (full 170 sectors → 0x10000..0x25400) ---
-    ; Must load before PM switch because we need BIOS INT 13h.
-    call load_weights
+    ;--- Enable A20 (needed before any copy above 1 MB) ---
+    call enable_a20
+
+    ;--- Load weights high: INT 13h → bounce buffer → unreal-mode copy ---
+    ; 3,681 sectors land at 0x200000 in 32 KB chunks. Must happen before
+    ; the PM switch because we need BIOS INT 13h for the reads.
+    call load_weights_high
 
     ;--- VESA video mode ---
     call setup_vesa
-
-    ;--- Enable A20 (keyboard controller method + fast fallback) ---
-    call enable_a20
 
     ;--- Load GDT ---
     lgdt [gdt_descriptor]
@@ -178,34 +181,92 @@ load_kernel:
     ret
 
 ;---------------------------------------
-; load_weights — full 170 sectors from WEIGHTS_LBA → 0x10000..0x25400
-; Six segment-aligned 16KB chunks: contiguous for WEIGHT_BASE and none
-; crosses a 64KB DMA boundary.
+; enter_unreal — flat 4 GB cached limits on DS/ES while staying in RM.
+; Loading a segment register in real mode updates the base but leaves
+; the cached limit untouched: after this brief PM round-trip, 32-bit
+; addresses work with a32 overrides. Interrupts stay off (stage 2 runs
+; under cli throughout; SeaBIOS INT 13h tolerates IF=0).
 ;---------------------------------------
-load_weights:
+enter_unreal:
+    push ds
+    push es
+    lgdt [gdt_descriptor]
+    mov eax, cr0
+    or al, 1
+    mov cr0, eax
+    jmp short .pm
+.pm:
+    mov bx, 0x10             ; flat 4 GB data descriptor
+    mov ds, bx
+    mov es, bx
+    and al, 0xFE
+    mov cr0, eax
+    jmp short .rm
+.rm:
+    pop es
+    pop ds
+    ret
+
+;---------------------------------------
+; load_weights_high — WEIGHT_SECTORS from WEIGHTS_LBA → WEIGHT_BASE (2 MB).
+; Loop: INT 13h reads CHUNK_SECTORS into the bounce buffer at 0x10000,
+; then an unreal-mode a32 rep movsd lifts the chunk above 1 MB.
+; Boot-time only; determinism is untouched — after boot the system is
+; exactly the Tier 2 machine with bigger matrices and no disk in the loop.
+;---------------------------------------
+load_weights_high:
     pusha
-    mov si, weight_chunks
-    mov bp, 6
-.wc_loop:
-    mov ax, [si]             ; sector count
-    mov bx, [si+2]           ; dest segment
-    xor dx, dx               ; dest offset = 0
-    mov cx, [si+4]           ; LBA
+    call enter_unreal
+
+    mov word [lw_lba], WEIGHTS_LBA
+    mov dword [lw_dest], WEIGHT_BASE
+    mov word [lw_left], WEIGHT_SECTORS
+
+.lw_loop:
+    mov ax, [lw_left]
+    cmp ax, CHUNK_SECTORS
+    jbe .lw_sized
+    mov ax, CHUNK_SECTORS
+.lw_sized:
+    mov [lw_this], ax
+
+    ; Read chunk → bounce buffer
+    mov bx, BOUNCE_BASE >> 4 ; dest segment 0x1000
+    xor dx, dx               ; dest offset 0
+    mov cx, [lw_lba]
     call disk_read
-    add si, 6
-    dec bp
-    jnz .wc_loop
+
+    ; Copy bounce → high destination (flat, unreal)
+    push ds
+    push es
+    xor bx, bx
+    mov ds, bx
+    mov es, bx
+    mov esi, BOUNCE_BASE
+    mov edi, [lw_dest]
+    movzx ecx, word [lw_this]
+    shl ecx, 7               ; sectors × 512 / 4 = dwords
+    a32 rep movsd
+    pop es
+    pop ds
+
+    ; Advance LBA / destination / remaining
+    mov ax, [lw_this]
+    add [lw_lba], ax
+    movzx eax, word [lw_this]
+    shl eax, 9
+    add [lw_dest], eax
+    mov ax, [lw_this]
+    sub [lw_left], ax
+    jnz .lw_loop
+
     popa
     ret
 
-; count, dest-segment, LBA   (segment*16 = physical base)
-weight_chunks:
-    dw 32, 0x1000, WEIGHTS_LBA          ; phys 0x10000
-    dw 32, 0x1400, WEIGHTS_LBA + 32     ; phys 0x14000
-    dw 32, 0x1800, WEIGHTS_LBA + 64     ; phys 0x18000
-    dw 32, 0x1C00, WEIGHTS_LBA + 96     ; phys 0x1C000
-    dw 32, 0x2000, WEIGHTS_LBA + 128    ; phys 0x20000
-    dw 10, 0x2400, WEIGHTS_LBA + 160    ; phys 0x24000  (170 total)
+lw_lba:  dw 0
+lw_left: dw 0
+lw_this: dw 0
+lw_dest: dd 0
 
 ;---------------------------------------
 ; disk_read — INT 13h AH=42h LBA read
@@ -514,25 +575,27 @@ times 2560 - ($ - boot_entry) db 0
 [bits 32]
 
 ;--- Constants ---
-WEIGHT_BASE     equ 0x10000     ; Weights: 0x10000 .. 0x25400 (170 sectors)
+WEIGHT_BASE     equ 0x200000    ; Weights: 2 MB mark (1.8 MB blob, loaded high at boot)
+BOUNCE_BASE     equ 0x10000     ; 32 KB boot-time bounce buffer (scratch after boot)
 ACTIV_BASE      equ 0x60000     ; Activations scratch (moved clear of weights)
 HISTORY_BASE    equ 0x30000     ; Input history buffer (above weight region)
 KEYBUF_BASE     equ 0x70000     ; Keyboard ring buffer
 
 ; Network topology
-NET_INPUT       equ 256         ; 32 events × 8 features
-NET_HIDDEN1     equ 128
-NET_HIDDEN2     equ 64
-NET_OUTPUT      equ 32
-NET_HISTORY     equ 32          ; Context events
+NET_INPUT       equ 512         ; 64 events × 8 features
+NET_HIDDEN1     equ 1024
+NET_HIDDEN2     equ 384
+NET_OUTPUT      equ 64
+NET_HISTORY     equ 64          ; Context events
+NET_TOTAL_W     equ (NET_INPUT*NET_HIDDEN1)+(NET_HIDDEN1*NET_HIDDEN2)+(NET_HIDDEN2*NET_OUTPUT)  ; 942,080
 NET_FEATURES    equ 8           ; Features per event
 
 ; Weight offsets (in bytes, int16 = 2 bytes each)
 ; Header is 128 bytes
 W_HEADER        equ 128
-W1_OFF          equ W_HEADER                            ; 256×128 = 32768 weights
-W2_OFF          equ W1_OFF + (NET_INPUT * NET_HIDDEN1 * 2)     ; 128×64 = 8192
-W3_OFF          equ W2_OFF + (NET_HIDDEN1 * NET_HIDDEN2 * 2)   ; 64×32 = 2048
+W1_OFF          equ W_HEADER                            ; 512×1024 = 524288 weights
+W2_OFF          equ W1_OFF + (NET_INPUT * NET_HIDDEN1 * 2)     ; 1024×384 = 393216
+W3_OFF          equ W2_OFF + (NET_HIDDEN1 * NET_HIDDEN2 * 2)   ; 384×64 = 24576
 
 ; Activation offsets in ACTIV_BASE
 A_INPUT         equ 0
@@ -610,7 +673,7 @@ pm_entry:
     ; Set up PIC (remap IRQs to 32-47)
     call setup_pic
 
-    ; Set up PIT at 100Hz
+    ; Set up PIT at 20 Hz (Tier 3 inference budget)
     call setup_pit
 
     ; Clear screen
@@ -723,8 +786,11 @@ setup_pit:
     mov al, 0x34             ; 00110100b
     out 0x43, al
 
-    ; Divisor for 100Hz: 1193182 / 100 = 11932 = 0x2E9C
-    mov ax, 11932
+    ; Divisor for 20 Hz: 1193182 / 20 = 59659. Tier 3's forward pass is
+    ; ~22x Tier 2's MAC count; the tick is the measured budget for one
+    ; full state transition. Determinism is rate-independent — the
+    ; invariant is one transition per tick, not the tick's frequency.
+    mov ax, 59659
     out 0x40, al             ; Low byte
     mov al, ah
     out 0x40, al             ; High byte
@@ -1872,7 +1938,8 @@ crc32_tab:
 ;---------------------------------------
 ; validate_weights — don't mistake the map for the territory.
 ; Verifies magic, layer sizes, weight count, and CRC32 of all
-; 86,016 weight bytes against the trained header. On failure:
+; 1,884,160 weight bytes against the trained header (~19M nibble
+; steps: well under a second, once, at boot). On failure:
 ; hdr_status = 2, screen painted red, message drawn, hard halt.
 ;---------------------------------------
 validate_weights:
@@ -1887,10 +1954,10 @@ validate_weights:
     jne .vw_bad
     cmp word [WEIGHT_BASE + 11], NET_OUTPUT
     jne .vw_bad
-    cmp dword [WEIGHT_BASE + 16], 43008
+    cmp dword [WEIGHT_BASE + 16], NET_TOTAL_W
     jne .vw_bad
     mov esi, WEIGHT_BASE + W_HEADER
-    mov ecx, 43008 * 2
+    mov ecx, NET_TOTAL_W * 2
     call crc32_region
     cmp eax, [WEIGHT_BASE + 21]
     jne .vw_bad
@@ -1967,23 +2034,7 @@ times (2560 + 32768) - ($ - boot_entry) db 0
 ;===============================================================================
 
 weights_placeholder:
-    ; 128-byte header
-    db 'DN'                  ; Magic
-    db 2                     ; Version
-    db 2                     ; Tier
-    db 4                     ; Num layers
-    db 0, 1                  ; INPUT_SIZE = 256 (little-endian word)
-    db 128, 0                ; HIDDEN1 = 128
-    db 64, 0                 ; HIDDEN2 = 64
-    db 32, 0                 ; OUTPUT = 32
-    times 116 db 0           ; Padding to 128 bytes
-
-    ; Placeholder weights — will be overwritten by dd
-    %assign i 0
-    %rep 43008
-        dw (i * 17 + 31) % 512 - 256
-    %assign i i+1
-    %endrep
-
-    ; Pad to 86KB (172 sectors)
-    times 88064 - ($ - weights_placeholder) db 0
+    ; Zeroed region — tools/build.py patches the trained blob here.
+    ; An unpatched image has no 'DN' magic: validate_weights paints it
+    ; red and halts. The image never runs on weights it can't verify.
+    times (WEIGHT_SECTORS * 512) db 0

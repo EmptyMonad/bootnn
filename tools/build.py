@@ -32,7 +32,7 @@ from pathlib import Path
 # Layout constants — must match src/dnos.asm and Makefile.
 SECTOR_SIZE   = 512
 WEIGHT_SECTOR = 69            # 0-indexed block; weights begin at sector 70
-FLOPPY_SIZE   = 1474560       # 1.44 MB
+IMAGE_SIZE    = 2097152       # 2 MB (weights end at 1,920,000; rounded up)
 
 ROOT     = Path(__file__).resolve().parent.parent
 ASM_SRC  = ROOT / "src" / "dnos.asm"
@@ -124,18 +124,18 @@ def patch_weights():
 
 
 def pad_image():
-    """Pad/truncate the image to floppy size (replaces truncate)."""
+    """Pad the image to IMAGE_SIZE (hard-disk boot; no floppy geometry)."""
     size = IMAGE.stat().st_size
-    if size < FLOPPY_SIZE:
+    if size < IMAGE_SIZE:
         with open(IMAGE, "r+b") as f:
-            f.seek(FLOPPY_SIZE - 1)
+            f.seek(IMAGE_SIZE - 1)
             f.write(b"\x00")
-    elif size > FLOPPY_SIZE:
-        print(f"  WARNING: image is {size:,} bytes (> {FLOPPY_SIZE:,}); "
+    elif size > IMAGE_SIZE:
+        print(f"  WARNING: image is {size:,} bytes (> {IMAGE_SIZE:,}); "
               f"truncating.")
         with open(IMAGE, "r+b") as f:
-            f.truncate(FLOPPY_SIZE)
-    print(f"[DNOS] Image padded to {FLOPPY_SIZE:,} bytes")
+            f.truncate(IMAGE_SIZE)
+    print(f"[DNOS] Image padded to {IMAGE_SIZE:,} bytes")
 
 
 def boot(qemu, extra):

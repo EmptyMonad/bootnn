@@ -1,8 +1,11 @@
 # Tier 3 Design — ~1M Weights via Streaming Inference
 
-> Status: **design** — no code exists. This document is the gate for Tier 3
-> implementation work, per the roadmap rule that Tier 3 does not start
-> without a design doc.
+> Status: **implemented** (Strategy A). Kept as the design of record.
+> Resolved open questions: (1) bounce-copy chosen — implemented as
+> unreal-mode a32 copies from a 32 KB bounce buffer, the boring and
+> portable option; (2) tick rate fixed at 20 Hz, verified live by
+> `tools/tick_test.py` (delta_step == delta_tick under QEMU TCG);
+> (3) IAL-token input encoding deferred to the distributed phase.
 
 ## Goal
 

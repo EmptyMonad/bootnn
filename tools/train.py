@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DNOS Tier 2 Weight Generator
+DNOS Tier 3 Weight Generator
 4-layer network (256→128→64→32) with Q8.8 quantization-aware training.
 
 Generates weights matching the assembly neural core exactly:
@@ -25,17 +25,17 @@ from pathlib import Path
 # Network Topology (must match dnos.asm exactly)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-INPUT_SIZE = 256      # 32 events × 8 features
-HIDDEN1_SIZE = 128
-HIDDEN2_SIZE = 64
-OUTPUT_SIZE = 32
+INPUT_SIZE = 512      # 64 events × 8 features
+HIDDEN1_SIZE = 1024
+HIDDEN2_SIZE = 384
+OUTPUT_SIZE = 64
 
 LAYER_SIZES = [INPUT_SIZE, HIDDEN1_SIZE, HIDDEN2_SIZE, OUTPUT_SIZE]
 
-W1_COUNT = INPUT_SIZE * HIDDEN1_SIZE    # 32768
-W2_COUNT = HIDDEN1_SIZE * HIDDEN2_SIZE  #  8192
-W3_COUNT = HIDDEN2_SIZE * OUTPUT_SIZE   #  2048
-TOTAL_WEIGHTS = W1_COUNT + W2_COUNT + W3_COUNT  # 43008
+W1_COUNT = INPUT_SIZE * HIDDEN1_SIZE    # 524288
+W2_COUNT = HIDDEN1_SIZE * HIDDEN2_SIZE  # 393216
+W3_COUNT = HIDDEN2_SIZE * OUTPUT_SIZE   #  24576
+TOTAL_WEIGHTS = W1_COUNT + W2_COUNT + W3_COUNT  # 942080
 
 HEADER_SIZE = 128
 WEIGHT_DATA_SIZE = TOTAL_WEIGHTS * 2  # int16
@@ -71,7 +71,7 @@ CMD_NAMES = [
 CMD = {name: i for i, name in enumerate(CMD_NAMES)}
 
 # Context
-CONTEXT_EVENTS = 32
+CONTEXT_EVENTS = 64
 CONTEXT_FEATURES = 8
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -162,7 +162,7 @@ def generate_training_data(ctx_rng=None):
                           | {ord(c) for c in 'boxlinerectpixfilcsudwnghty'})
     for key, cmd, desc in single_keys:
         for v in range(16):
-            # Histories span the whole 32-event context window
+            # Histories span the whole 64-event context window
             hist_len = int(ctx_rng.integers(1, 32))
             hist = [int(ctx_rng.choice(history_pool)) for _ in range(hist_len)]
             inp = sequence_to_input([key] + hist)
@@ -558,28 +558,12 @@ class Tier2Network:
 
     def save(self, filename):
         """Save weights in DNOS Tier 2 binary format."""
-        weight_data = bytearray()
+        # Row-per-neuron layout (for each j, all i) == transpose, C-order.
+        def q(w):
+            v = np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX)
+            return v.T.astype('<i2').tobytes()
 
-        # Weights: w1 (input→hidden1) stored as hidden1 rows of input columns
-        for j in range(HIDDEN1_SIZE):
-            for i in range(INPUT_SIZE):
-                val = int(np.round(self.w1[i, j] * Q88_SCALE))
-                val = max(Q88_MIN, min(Q88_MAX, val))
-                weight_data += struct.pack('<h', val)
-
-        # w2
-        for j in range(HIDDEN2_SIZE):
-            for i in range(HIDDEN1_SIZE):
-                val = int(np.round(self.w2[i, j] * Q88_SCALE))
-                val = max(Q88_MIN, min(Q88_MAX, val))
-                weight_data += struct.pack('<h', val)
-
-        # w3
-        for j in range(OUTPUT_SIZE):
-            for i in range(HIDDEN2_SIZE):
-                val = int(np.round(self.w3[i, j] * Q88_SCALE))
-                val = max(Q88_MIN, min(Q88_MAX, val))
-                weight_data += struct.pack('<h', val)
+        weight_data = bytearray(q(self.w1) + q(self.w2) + q(self.w3))
 
         assert len(weight_data) == WEIGHT_DATA_SIZE, \
             f"Weight data size mismatch: {len(weight_data)} vs {WEIGHT_DATA_SIZE}"
@@ -590,8 +574,8 @@ class Tier2Network:
         # Build header (128 bytes)
         header = bytearray(HEADER_SIZE)
         header[0:2] = b'DN'
-        header[2] = 2                    # Version
-        header[3] = 2                    # Tier
+        header[2] = 3                    # Version
+        header[3] = 3                    # Tier
         header[4] = 4                    # Num layers
         # Layer sizes as little-endian uint16
         struct.pack_into('<H', header, 5, INPUT_SIZE)
@@ -646,74 +630,45 @@ def crc32(data):
 # Assembly Math Simulator (for validation)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_SIM_CACHE = {}
+
+
 def simulate_assembly_forward(weights_file, input_vec):
     """Simulate the exact assembly forward pass using int16 arithmetic.
-    This catches precision issues before they hit bare metal."""
+    This catches precision issues before they hit bare metal.
 
-    with open(weights_file, 'rb') as f:
-        header = f.read(HEADER_SIZE)
-        raw = f.read(WEIGHT_DATA_SIZE)
+    Vectorized but BIT-EXACT: per-term (a*w) is computed in int64
+    (exact for int16*int16), then arithmetically shifted right 8
+    (numpy >> on signed ints floors, exactly like `sar eax, 8`),
+    then summed. Layer clamps match the kernel.  The weight file is
+    parsed once and cached (mtime-keyed) — Tier 3 calls this 1000+
+    times per eval run."""
 
-    # Parse weights as int16
-    weights = np.frombuffer(raw, dtype=np.int16)
+    key = (weights_file, Path(weights_file).stat().st_mtime_ns)
+    cached = _SIM_CACHE.get("key") == key
+    if not cached:
+        with open(weights_file, 'rb') as f:
+            f.read(HEADER_SIZE)
+            raw = f.read(WEIGHT_DATA_SIZE)
+        w = np.frombuffer(raw, dtype='<i2').astype(np.int64)
+        # Row-per-neuron on disk: reshape to (out, in), transpose to (in, out)
+        w1 = w[:W1_COUNT].reshape(HIDDEN1_SIZE, INPUT_SIZE).T
+        w2 = w[W1_COUNT:W1_COUNT + W2_COUNT].reshape(HIDDEN2_SIZE, HIDDEN1_SIZE).T
+        w3 = w[W1_COUNT + W2_COUNT:].reshape(OUTPUT_SIZE, HIDDEN2_SIZE).T
+        _SIM_CACHE.update(key=key, w1=w1, w2=w2, w3=w3)
+    w1, w2, w3 = _SIM_CACHE["w1"], _SIM_CACHE["w2"], _SIM_CACHE["w3"]
 
-    # Input as Q8.8
-    inp_q = np.round(input_vec * Q88_SCALE).astype(np.int32)
-    inp_q = np.clip(inp_q, Q88_MIN, Q88_MAX)
+    inp_q = np.clip(np.round(input_vec * Q88_SCALE), Q88_MIN, Q88_MAX).astype(np.int64)
 
-    # Layer 1: Input→Hidden1
-    w1_start = 0
-    hidden1 = np.zeros(HIDDEN1_SIZE, dtype=np.int32)
-    for j in range(HIDDEN1_SIZE):
-        acc = 0
-        for i in range(INPUT_SIZE):
-            w_idx = w1_start + j * INPUT_SIZE + i
-            # imul: int16 * int16 → int32, then >> 8
-            prod = int(inp_q[i]) * int(weights[w_idx])
-            prod >>= 8  # Assembly: sar eax, 8
-            acc += prod
-        # ReLU
-        if acc < 0:
-            acc = 0
-        if acc > 32767:
-            acc = 32767
-        hidden1[j] = acc
+    def layer(act, wmat):
+        # (in,1) * (in,out) -> per-term products, sar 8 each, sum columns
+        return ((act[:, None] * wmat) >> 8).sum(axis=0)
 
-    # Layer 2: Hidden1→Hidden2
-    w2_start = W1_COUNT
-    hidden2 = np.zeros(HIDDEN2_SIZE, dtype=np.int32)
-    for j in range(HIDDEN2_SIZE):
-        acc = 0
-        for i in range(HIDDEN1_SIZE):
-            w_idx = w2_start + j * HIDDEN1_SIZE + i
-            prod = int(hidden1[i]) * int(weights[w_idx])
-            prod >>= 8
-            acc += prod
-        if acc < 0:
-            acc = 0
-        if acc > 32767:
-            acc = 32767
-        hidden2[j] = acc
-
-    # Layer 3: Hidden2→Output (piecewise sigmoid)
-    w3_start = W1_COUNT + W2_COUNT
-    output = np.zeros(OUTPUT_SIZE, dtype=np.int32)
-    for j in range(OUTPUT_SIZE):
-        acc = 0
-        for i in range(HIDDEN2_SIZE):
-            w_idx = w3_start + j * HIDDEN2_SIZE + i
-            prod = int(hidden2[i]) * int(weights[w_idx])
-            prod >>= 8
-            acc += prod
-        # Piecewise sigmoid (matches assembly)
-        if acc < -8192:
-            acc = 0
-        elif acc > 8192:
-            acc = 32767
-        else:
-            acc = (acc + 8192) << 1
-        output[j] = acc
-
+    h1 = np.clip(layer(inp_q, w1), 0, 32767)          # ReLU + clamp
+    h2 = np.clip(layer(h1, w2), 0, 32767)
+    acc = layer(h2, w3)                                # piecewise sigmoid
+    output = np.where(acc < -8192, 0,
+             np.where(acc > 8192, 32767, (acc + 8192) << 1)).astype(np.int32)
     return output
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -764,7 +719,7 @@ def main():
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(description='DNOS Tier 2 Weight Generator')
+    parser = argparse.ArgumentParser(description='DNOS Tier 3 Weight Generator')
     parser.add_argument('--epochs', type=int, default=4000,
                         help='Training epochs (default: 4000)')
     parser.add_argument('--lr', type=float, default=0.02,
