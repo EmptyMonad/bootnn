@@ -168,11 +168,16 @@ conversation. Order is deliberate.
    frame = version byte + the Tier 4 event features; kernel framer on
    COM1; `dnos_client.py` and the Rust IAL emit it; serial_test
    extended to frame level.
-4. 📋 **S2 — contribution log + mint prototype** (SWARM_DESIGN, S2):
-   host-side first. Merkle-chained JSONL event log; contribution tuple
-   `(base_crc, dataset_delta, hyperparams, seed, claimed_crc)`;
-   verifier that replays training and accepts/rejects; wallet as a
-   deterministic fold over the log. No blockchain, no kernel changes.
+4. 🚧 **S2 — contribution log + mint prototype**: core **landed**
+   (`tools/ledger.py` + `tools/ledger_test.py`, in CI) — hash-chained
+   JSONL log, claims are training tuples, verification is replay
+   (rerun `train.py`, compare CRC32), issuance is a pure function of
+   the log (no mint event exists to forge), transfers append-validated
+   and audit-re-derived, tampering cascades to audit failure.
+   Remaining: dataset-delta claims (train.py must accept a data
+   contribution, not just hyperparams), gauntlet gating before a
+   verified blob becomes law, ML-DSA signatures on entries, SPHINCS+
+   identities, hardware-profile reward class (portability mints).
 5. 📋 **S3 spike — two specialists + a router** (SWARM_DESIGN, S3):
    train two blobs on disjoint command subsets, host-side router,
    measure against one equal-weight generalist. Falsifies (or funds)

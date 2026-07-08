@@ -52,6 +52,9 @@ jobs:
       - name: Client record/replay test (S1 - the log IS the session)
         run: python3 tools/client_test.py
 
+      - name: Ledger test (S2 - mint on verified replay, tamper-evident history)
+        run: python3 tools/ledger_test.py
+
       - name: Rust determinism layers (IAL + NDAL)
         run: |
           cargo test --manifest-path ial/Cargo.toml
