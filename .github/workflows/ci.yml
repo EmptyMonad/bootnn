@@ -43,6 +43,9 @@ jobs:
       - name: Deterministic-loop test (step_count <= tick_count, burst drain)
         run: python3 tools/tick_test.py
 
+      - name: Swarm replication test (S0 - N nodes, one log, one state)
+        run: python3 tools/swarm_test.py --nodes 3
+
       - name: Rust determinism layers (IAL + NDAL)
         run: |
           cargo test --manifest-path ial/Cargo.toml

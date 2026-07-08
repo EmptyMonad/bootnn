@@ -102,8 +102,12 @@ Move from "executing code" to "being the rule," on real hardware.
   generalization, boot, integrity (CRC over 1.8 MB, negative-tested),
   tick invariant, and law==metal differential — all passing.
 - 🚧 **Swarm (distributed phase).** Designed in `docs/SWARM_DESIGN.md`:
-  S0 deterministic replication (N nodes, one log, per-tick state digests
-  equal and == simulator — pure tooling, zero kernel changes), S1 an
+  ✅ **S0 deterministic replication** — `tools/swarm_test.py`, in CI:
+  3 nodes fed one event log agree on state vector and cropped-framebuffer
+  CRC at every checkpoint, each equal to the simulator's prediction;
+  a one-event fork on a single node is detected and localized while the
+  others stay in agreement. Node age (tick_count) is wall-clock-relative
+  and excluded: nodes are equal in state, not in age. Next: S1 an
   IAL-token input surface over COM1 (humans and agents produce the same
   replayable event stream; resolves Tier 3 OQ3), S2 a contribution
   economy where verification is deterministic replay and the wallet is a

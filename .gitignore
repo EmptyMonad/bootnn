@@ -10,6 +10,7 @@ shot_*.png
 dnos.lst
 dnos_symbols.json
 interactive_shots/
+swarm_shots/
 ci_log*
 *.o
 
