@@ -107,9 +107,15 @@ Move from "executing code" to "being the rule," on real hardware.
   CRC at every checkpoint, each equal to the simulator's prediction;
   a one-event fork on a single node is detected and localized while the
   others stay in agreement. Node age (tick_count) is wall-clock-relative
-  and excluded: nodes are equal in state, not in age. Next: S1 an
-  IAL-token input surface over COM1 (humans and agents produce the same
-  replayable event stream; resolves Tier 3 OQ3), S2 a contribution
+  and excluded: nodes are equal in state, not in age.
+  🚧 **S1 input surface** — v0 landed, in CI: COM1 is a polled event
+  producer feeding the same ring as the keyboard (scancode→ASCII at the
+  edge; UART probe-guarded so absent hardware can't flood the ring).
+  `tools/serial_test.py` proves a PS/2-driven node and a wire-driven
+  node fed the same semantic log occupy identical states — humans and
+  agents are peers above one deterministic interface, executable form.
+  Remaining: versioned 8-byte IAL token framing (Tier 3 OQ3), thin host
+  client. Then: S2 a contribution
   economy where verification is deterministic replay and the wallet is a
   region of replicated state, S3 specialization + routing — the emergent
   architecture, gated on 2 specialists + router beating an equal-weight

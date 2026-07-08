@@ -49,6 +49,7 @@ SYMBOL_NAMES = {
     "tick_count", "last_cmd", "last_confidence", "cursor_x", "cursor_y",
     "color_idx", "draw_size", "kb_read_idx", "kb_write_idx", "k_video_mode",
     "last_tick", "step_count", "hdr_status",
+    "serial_present", "serial_rx_count",
 }
 
 # Fallback install locations (this machine + common defaults).

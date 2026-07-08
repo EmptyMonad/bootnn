@@ -24,6 +24,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from boot_test import find_qemu  # noqa: E402
+
 IMAGE = ROOT / "dnos.img"
 SYMBOLS = json.loads((ROOT / "dnos_symbols.json").read_text())
 
@@ -74,7 +77,7 @@ def main():
     failures = []
 
     proc = subprocess.Popen(
-        ["qemu-system-i386", "-drive", f"file={IMAGE},format=raw", "-m", "16M",
+        [find_qemu(None), "-drive", f"file={IMAGE},format=raw", "-m", "16M",
          "-display", "none", "-qmp", f"tcp:127.0.0.1:{QMP_PORT},server,nowait",
          "-no-reboot", "-no-shutdown"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

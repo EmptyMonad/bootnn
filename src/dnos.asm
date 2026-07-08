@@ -676,6 +676,9 @@ pm_entry:
     ; Set up PIT at 20 Hz (Tier 3 inference budget)
     call setup_pit
 
+    ; Set up COM1 (polled event producer; probe-guarded)
+    call setup_serial
+
     ; Clear screen
     call clear_screen
 
@@ -826,6 +829,14 @@ keyboard_isr:
     test al, 0x80
     jnz .kb_done
 
+    ; Convert to ASCII at the edge: the ring carries *events*, not
+    ; scancodes, so the keyboard and COM1 producers are indistinguishable
+    ; to the consumer (SWARM_DESIGN S1). Unmapped keys are discarded here,
+    ; exactly as NUL bytes are discarded by serial_drain.
+    call scan_to_ascii
+    test al, al
+    jz .kb_done
+
     ; Store in ring buffer
     movzx ebx, word [kb_write_idx]
     mov [KEYBUF_BASE + ebx], al
@@ -863,6 +874,80 @@ read_key:
 
 .no_key:
     xor eax, eax
+    ret
+
+;---------------------------------------
+; COM1 setup — polled, no IRQ (SWARM_DESIGN S1, v0 byte framing).
+; Scratch-register probe first: on hardware with no UART the bus floats
+; 0xFF, LSR would read "data ready" forever, and a blind poll would
+; flood the event ring. Absent device => serial_present stays 0 and
+; serial_drain is a no-op.
+;---------------------------------------
+SERIAL_BASE     equ 0x3F8       ; COM1
+
+setup_serial:
+    mov dx, SERIAL_BASE + 7     ; scratch register probe
+    mov al, 0xA5
+    out dx, al
+    in al, dx
+    cmp al, 0xA5
+    jne .no_uart
+    mov dx, SERIAL_BASE + 1     ; IER = 0: we poll at the tick boundary
+    xor al, al
+    out dx, al
+    mov dx, SERIAL_BASE + 3     ; LCR: DLAB on
+    mov al, 0x80
+    out dx, al
+    mov dx, SERIAL_BASE         ; divisor 1 = 115200 baud
+    mov al, 1
+    out dx, al
+    mov dx, SERIAL_BASE + 1
+    xor al, al
+    out dx, al
+    mov dx, SERIAL_BASE + 3     ; LCR: 8N1, DLAB off
+    mov al, 0x03
+    out dx, al
+    mov dx, SERIAL_BASE + 2     ; FCR: enable + clear FIFOs, 14-byte trigger
+    mov al, 0xC7
+    out dx, al
+    mov dx, SERIAL_BASE + 4     ; MCR: DTR | RTS
+    mov al, 0x03
+    out dx, al
+    mov byte [serial_present], 1
+.no_uart:
+    ret
+
+;---------------------------------------
+; Drain pending COM1 bytes into the shared event ring (bounded).
+; Producer twin of keyboard_isr: bytes arriving on the wire are already
+; events (ASCII, v0 framing); NUL is discarded exactly like an unmapped
+; scancode. Consumption stays one event per tick in the main loop —
+; this only moves bytes from the 16-byte UART FIFO into the 256-byte
+; ring so agent-rate bursts are absorbed, not dropped.
+; Clobbers: EAX, EBX, ECX, EDX.
+;---------------------------------------
+serial_drain:
+    cmp byte [serial_present], 0
+    je .done
+    mov ecx, 32                 ; per-tick bound (2x FIFO depth)
+.next:
+    mov dx, SERIAL_BASE + 5     ; LSR
+    in al, dx
+    test al, 0x01               ; data ready?
+    jz .done
+    mov dx, SERIAL_BASE
+    in al, dx                   ; RBR
+    test al, al                 ; discard NUL
+    jz .cont
+    movzx ebx, word [kb_write_idx]
+    mov [KEYBUF_BASE + ebx], al
+    inc bx
+    and bx, 0xFF                ; wrap at 256, same ring discipline
+    mov [kb_write_idx], bx
+    inc dword [serial_rx_count]
+.cont:
+    loop .next
+.done:
     ret
 
 ;---------------------------------------
@@ -975,16 +1060,13 @@ main_loop:
     mov [last_tick], eax
     inc dword [step_count]
 
-    ; Consume at most one buffered keyboard event this tick
+    ; Drain any pending COM1 bytes into the shared event ring (bounded,
+    ; producer side only), then consume at most ONE event this tick.
+    ; The ring already holds ASCII: both producers convert at the edge.
+    call serial_drain
     call read_key
     test al, al
     jz .no_input
-
-    ; Convert scancode to ASCII
-    push eax
-    call scan_to_ascii
-    test al, al
-    jz .skip_input
 
     ; Check ESC
     cmp al, 27
@@ -1000,9 +1082,6 @@ main_loop:
     ; Decode and execute
     call decode_output_32
 
-.skip_input:
-    pop eax
-
 .no_input:
     ; Draw cursor
     call draw_cursor
@@ -1017,7 +1096,6 @@ main_loop:
     jmp main_loop            ; pacing hlt is at the top of the loop
 
 .halt:
-    pop eax
     cli
     hlt
 
@@ -2014,6 +2092,9 @@ last_confidence: dd 0
 
 kb_read_idx:    dw 0
 kb_write_idx:   dw 0
+
+serial_present: db 0            ; UART probe result (0 = never poll)
+serial_rx_count: dd 0           ; COM1 bytes accepted into the event ring
 
 last_tick:      dd 0            ; tick consumed by the last main-loop step
 step_count:     dd 0            ; state transitions performed (<= tick_count)

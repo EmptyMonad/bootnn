@@ -46,6 +46,9 @@ jobs:
       - name: Swarm replication test (S0 - N nodes, one log, one state)
         run: python3 tools/swarm_test.py --nodes 3
 
+      - name: Serial differential test (S1 - keyboard and wire are one interface)
+        run: python3 tools/serial_test.py
+
       - name: Rust determinism layers (IAL + NDAL)
         run: |
           cargo test --manifest-path ial/Cargo.toml

@@ -65,6 +65,17 @@ nothing downstream survives; if they don't, replication is free forever.
 
 ### S1 — The input surface (human- and agent-usable)
 
+> Status: **v0 landed.** COM1 is a polled event producer feeding the
+> same ring as the keyboard; the ISR converts scancode→ASCII at the
+> edge so the two producers are indistinguishable to `f`. Framing v0
+> is one raw byte = one event (the event unit today *is* an 8-bit
+> key); the 8-byte IAL token frame below is v1, required when events
+> carry features beyond a keycode — version the frame before v1.
+> Gate: `tools/serial_test.py` — a PS/2-driven node and a COM1-driven
+> node fed the same semantic log occupy identical states (state
+> vector, framebuffer digest, ring indexes), each matching the law,
+> with provenance proven by `serial_rx_count`.
+
 PS/2 scancodes stop being the input; they become one *producer* of the
 input. The wire format is the **IAL token**: an 8-byte frame = 8 input
 features = exactly one event slot in the history window (the clean fit
