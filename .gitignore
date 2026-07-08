@@ -17,3 +17,5 @@ ci_log*
 target/
 __pycache__/
 final_state.png
+Cargo.lock
+dnos_corrupt*.img

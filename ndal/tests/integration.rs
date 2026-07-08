@@ -21,7 +21,7 @@ fn scenario_live_replay_full_cycle() {
 
     // === Live session ===
     let mut live = NdalPipeline::new(config.clone());
-    live.seed_random(0xDNOS);
+    live.seed_random(0xD005);
 
     let mut live_tokens = Vec::new();
 

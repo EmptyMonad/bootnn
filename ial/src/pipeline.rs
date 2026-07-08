@@ -153,14 +153,17 @@ impl Pipeline {
     pub fn flush(&mut self) -> Vec<Token> {
         let epoch = self.canonicalizer_current_epoch();
 
-        // Flush semantic encoder (e.g., partial word buffer)
+        // Flush semantic encoder (e.g., partial word buffer).
+        // push() returns any tokens it evicts — they MUST be kept, or
+        // buffered events are silently dropped at flush time.
         let semantic_tokens = self.semantic.flush(epoch);
+        let mut output = Vec::new();
         for token in &semantic_tokens {
-            self.canonicalizer.push(*token);
+            output.extend(self.canonicalizer.push(*token));
         }
 
         // Flush main canonicalizer
-        let mut output = self.canonicalizer.finish();
+        output.extend(self.canonicalizer.finish());
 
         // Flush multi-resolution canonicalizers
         for layer in &mut self.multi_res {
@@ -205,8 +208,9 @@ impl Pipeline {
     }
 
     fn canonicalizer_current_epoch(&self) -> Epoch {
-        // Default to epoch 0 if no tokens have been processed yet
-        Epoch(0)
+        // The epoch currently buffered in the canonicalizer; epoch 0 only
+        // if no tokens have been processed yet.
+        self.canonicalizer.current_epoch().unwrap_or(Epoch(0))
     }
 }
 

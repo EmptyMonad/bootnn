@@ -168,7 +168,7 @@ impl SpatialQuantizer {
 /// use a meta-network to learn useful abstractions.
 pub struct SemanticEncoder {
     /// Key buffer for word recognition
-    key_buffer: Vec<u8>,
+    key_buffer: Vec<(Epoch, u8)>,
     /// Maximum key buffer size before forced flush
     max_word_len: usize,
     /// Last mouse position for movement collapse
@@ -263,7 +263,7 @@ impl SemanticEncoder {
 
             // Buffer for word recognition (printable ASCII only)
             if scancode >= 0x20 && scancode < 0x7F {
-                self.key_buffer.push(scancode);
+                self.key_buffer.push((epoch, scancode));
 
                 // Flush if buffer full
                 if self.key_buffer.len() >= self.max_word_len {
@@ -342,15 +342,22 @@ impl SemanticEncoder {
             return vec![];
         }
 
-        // Hash the word to a fixed-size payload
-        let word_hash = fnv1a_bytes(&self.key_buffer);
-        let len = self.key_buffer.len() as u8;
+        // Canonicalize: cross-epoch order is real information (epochs are
+        // ordered), but within-epoch arrival order is noise the IAL must
+        // erase. Sort by (epoch, scancode) so any arrival order within an
+        // epoch hashes identically.
+        self.key_buffer.sort();
+        let chars: Vec<u8> = self.key_buffer.iter().map(|&(_, c)| c).collect();
+
+        // Hash the canonicalized word to a fixed-size payload
+        let word_hash = fnv1a_bytes(&chars);
+        let len = chars.len() as u8;
 
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&word_hash.to_le_bytes());
         payload[4] = len;
-        // Store first 3 chars for debugging
-        for (i, &ch) in self.key_buffer.iter().take(3).enumerate() {
+        // Store first 3 chars (canonical order) for debugging
+        for (i, &ch) in chars.iter().take(3).enumerate() {
             payload[5 + i] = ch;
         }
 
@@ -449,6 +456,11 @@ impl Canonicalizer {
     /// Force flush and return remaining tokens.
     pub fn finish(&mut self) -> Vec<Token> {
         self.flush_buffer()
+    }
+
+    /// The epoch currently being buffered, if any.
+    pub fn current_epoch(&self) -> Option<Epoch> {
+        self.current_epoch
     }
 
     /// Get the current stream hash digest.

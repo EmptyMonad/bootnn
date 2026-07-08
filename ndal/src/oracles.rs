@@ -175,11 +175,13 @@ impl Oracle for ClockOracle {
                     .unwrap_or_default()
                     .as_secs();
 
-                // Use the more restrictive of configured and requested resolution
+                // Use the more restrictive (coarser) of configured and
+                // requested resolution. Coarser = smaller discriminant;
+                // a request may never see finer time than the oracle allows.
                 let effective_res = if (*resolution as u8) < (self.resolution as u8) {
-                    self.resolution
-                } else {
                     *resolution
+                } else {
+                    self.resolution
                 };
 
                 let truncated = match effective_res {
