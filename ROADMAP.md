@@ -175,11 +175,18 @@ conversation. Order is deliberate.
    frame = version byte + event byte). Integer law specified:
    shift-subtract decay spectrum (structural, 8 log-spaced horizons),
    ternary drive + ternary MLP readout, `h` (512×int16) joins
-   canonical state and the swarm digest. Next: `tools/ssm_lab.py`
-   feasibility (BPTT trainer + stateful integer twin, measured on the
-   canonical suite + held-out streams; watch order-sensitivity of
-   word commands — 2-tap drive is the fallback), then graduate into
-   train.py as format v5 + kernel recurrent tick.
+   canonical state and the swarm digest. **Feasibility CONFIRMED**
+   (`tools/ssm_lab.py`, 10k epochs): canonical 387/387, held-out
+   99.9% (equal to Q8.8), words 100% in honest typing order —
+   recency-as-architecture lets ternary match full precision.
+   Graduation steps: (a) format v5 (decay table + ternary blocks) +
+   stateful `simulate_assembly_forward` in train.py, word data in
+   typing order; (b) kernel recurrent tick — shift-subtract decay,
+   packed-walk drive + readout, no `imul`, h at `h_base` in the
+   canonical state vector and swarm digest; (c) demo assertions
+   regenerated from the simulator; (d) every gate extended
+   (integrity over table+blocks, stateful differential, swarm digest
+   with h), tick budget re-measured, PIT re-pinned.
 3. 📋 **S1 v1 — versioned IAL token framing** (unblocked by item 2):
    frame = version byte + the Tier 4 event features; kernel framer on
    COM1; `dnos_client.py` and the Rust IAL emit it; serial_test

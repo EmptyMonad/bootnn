@@ -189,6 +189,19 @@ Per tick, event x = 8 features in {0, 256}:
   commands suffer, the cheap remedy is a 2-tap drive (x(t) and
   x(t-1) both feed W_in: 16x512), before anything heavier.
 
+> **Feasibility: CONFIRMED (2026-07-09, `tools/ssm_lab.py`, 10k
+> epochs, seed 1337).** Canonical 387/387, held-out streams
+> 1049/1050 (99.9% — equal to the Q8.8 canonical law), word commands
+> 100% in honest typing order (order-sensitivity risk retired; no
+> 2-tap drive needed). 946,176 ternary weights ≈ 236 KB packed, no
+> multiplies anywhere in the law. The windowed campaign's structural
+> ceiling (finding f) does not exist here: recency-as-architecture
+> lets uniform-magnitude weights match full-precision generalization.
+> Next: graduation — format v5 in train.py, stateful simulator,
+> h into canonical state and the swarm digest, kernel recurrent tick
+> with the packed-walk inner loop, demo regenerated from the
+> simulator, every gate extended.
+
 ## Exit criteria
 
 Tier 4 closes when the full gauntlet passes with ternary weights and
