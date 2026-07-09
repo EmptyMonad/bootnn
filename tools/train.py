@@ -162,8 +162,12 @@ def generate_training_data(ctx_rng=None):
                           | {ord(c) for c in 'boxlinerectpixfilcsudwnghty'})
     for key, cmd, desc in single_keys:
         for v in range(16):
-            # Histories span the whole 64-event context window
-            hist_len = int(ctx_rng.integers(1, 32))
+            # Histories span the whole 64-event context window. (Tier 3
+            # doubled the window 32->64; this bound lagged at 32, so the
+            # deep half of the window was always zero in training while
+            # context_eval and live use fill it. Q8.8 interpolated over
+            # the gap; ternary exposed it.)
+            hist_len = int(ctx_rng.integers(1, CONTEXT_EVENTS))
             hist = [int(ctx_rng.choice(history_pool)) for _ in range(hist_len)]
             inp = sequence_to_input([key] + hist)
             out = command_to_output(cmd)
@@ -265,14 +269,51 @@ def sigmoid_piecewise_deriv(x):
     mask = (x > -32.0) & (x < 32.0)
     return mask.astype(np.float32) / 64.0
 
-class Tier2Network:
-    """4-layer network with Q8.8 quantization-aware training."""
+def ternary_project(w, thresh_scale=0.75):
+    """Project a float weight matrix onto {-1, 0, +1} with a per-layer
+    power-of-two scale (Tier 4 Part A, docs/TIER4_DESIGN.md).
 
-    def __init__(self):
+    s = sign(w) where |w| > Δ (Δ = thresh_scale · mean|w|), else 0.
+    The scale is the power of two nearest the mean surviving magnitude:
+    k = round(-log2(mean|w[s≠0]|)), clamped to [0, 15] — applied on
+    metal as a single `sar k` per neuron after add/sub accumulation.
+    Returns (s as float ±1/0, k as int)."""
+    delta = thresh_scale * np.mean(np.abs(w))
+    s = np.sign(w) * (np.abs(w) > delta)
+    nz = np.abs(w[s != 0])
+    alpha = nz.mean() if nz.size else 1.0
+    k = int(np.clip(np.round(-np.log2(alpha)), 0, 15))
+    return s.astype(np.float32), k
+
+
+class Tier2Network:
+    """4-layer network with quantization-aware training.
+
+    quant='q88'     — Q8.8 int16 weights, per-term (a·w)>>8 then sum.
+    quant='ternary' — {-1,0,+1} weights, sum then >>k per layer (Tier 4a):
+                      terms are ±activation (already Q8.8), so the shift
+                      moves after the accumulator, one `sar` per neuron.
+    Activations and accumulators are Q8.8 int16 / int32 in both."""
+
+    def __init__(self, quant='q88', ternary_thresh=0.75,
+                 hidden=(HIDDEN1_SIZE, HIDDEN2_SIZE)):
+        self.quant = quant
+        self.ternary_thresh = ternary_thresh
+        # Hidden widths are an instance parameter (ternary compensates
+        # 1.58-bit weights with width; the Q8.8 canonical topology is
+        # frozen). The header carries the sizes; the simulator reads them
+        # from there, so no other layer hardcodes the topology.
+        self.h1, self.h2 = hidden
+        assert self.h1 % 4 == 0 and self.h2 % 4 == 0, "packing needs /4"
+        # Ternary: per-layer shifts are frozen after a short warmup so the
+        # integer law stops moving under the optimizer. Recomputing k every
+        # forward makes the layer scale jump by 2x whenever mean|w| crosses
+        # a power-of-two boundary - observed as oscillating accuracy.
+        self._frozen_k = None
         # Xavier initialization
-        self.w1 = np.random.randn(INPUT_SIZE, HIDDEN1_SIZE) * np.sqrt(2.0 / INPUT_SIZE)
-        self.w2 = np.random.randn(HIDDEN1_SIZE, HIDDEN2_SIZE) * np.sqrt(2.0 / HIDDEN1_SIZE)
-        self.w3 = np.random.randn(HIDDEN2_SIZE, OUTPUT_SIZE) * np.sqrt(2.0 / HIDDEN2_SIZE)
+        self.w1 = np.random.randn(INPUT_SIZE, self.h1) * np.sqrt(2.0 / INPUT_SIZE)
+        self.w2 = np.random.randn(self.h1, self.h2) * np.sqrt(2.0 / self.h1)
+        self.w3 = np.random.randn(self.h2, OUTPUT_SIZE) * np.sqrt(2.0 / self.h2)
 
         # Scale weights to Q8.8 friendly range
         self.w1 *= 0.5
@@ -334,10 +375,21 @@ class Tier2Network:
 
         return np.mean((self.a3 - y) ** 2)
 
-    def _ste_quant(self, w):
-        """Quantize weights to Q8.8 (forward). Straight-through on backward:
-        callers use the returned (quantized) value for the forward/backprop
-        matmuls but apply the gradient to the underlying float weight."""
+    def _project(self, w, li):
+        """Ternary projection with the layer's frozen shift, once frozen."""
+        s, k = ternary_project(w, self.ternary_thresh)
+        if self._frozen_k is not None:
+            k = self._frozen_k[li]
+        return s, k
+
+    def _ste_quant(self, w, li=0):
+        """Quantize weights for the forward pass (straight-through on
+        backward: callers use the returned value for the matmuls but apply
+        gradients to the underlying float weight). Dispatches on quant mode
+        so the whole QAT loop is shared between formats."""
+        if self.quant == 'ternary':
+            s, k = self._project(w, li)
+            return (2.0 ** -k) * s
         return np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX) / Q88_SCALE
 
     def _qat_forward(self, X, quantize=True):
@@ -347,9 +399,9 @@ class Tier2Network:
         since the kernel stores each hidden activation as an int16.
         Returns (logits, cache). Output argmax over [:20] equals the
         assembly's because the piecewise sigmoid is monotonic."""
-        w1 = self._ste_quant(self.w1) if quantize else self.w1
-        w2 = self._ste_quant(self.w2) if quantize else self.w2
-        w3 = self._ste_quant(self.w3) if quantize else self.w3
+        w1 = self._ste_quant(self.w1, 0) if quantize else self.w1
+        w2 = self._ste_quant(self.w2, 1) if quantize else self.w2
+        w3 = self._ste_quant(self.w3, 2) if quantize else self.w3
 
         z1 = X @ w1
         a1 = np.clip(z1, 0, ACT_MAX)
@@ -365,13 +417,22 @@ class Tier2Network:
 
     def _exact_int_logits(self, X):
         """Bit-exact integer forward — vectorized twin of
-        simulate_assembly_forward (per-element imul/sar-8 then accumulate,
-        int16-clamped activations). Used as the ground-truth selection metric
+        simulate_assembly_forward. Used as the ground-truth selection metric
         so training optimizes what the kernel actually computes."""
+        Xr = np.clip(np.round(X * Q88_SCALE), Q88_MIN, Q88_MAX).astype(np.int64)
+        if self.quant == 'ternary':
+            # Sum then sar-k: terms are ±activation, no per-term shift.
+            (s1, k1), (s2, k2), (s3, k3) = (self._project(w, i) for i, w in
+                                            enumerate((self.w1, self.w2,
+                                                       self.w3)))
+            z1 = (Xr @ s1.astype(np.int64)) >> k1
+            a1 = np.clip(z1, 0, Q88_MAX)
+            z2 = (a1 @ s2.astype(np.int64)) >> k2
+            a2 = np.clip(z2, 0, Q88_MAX)
+            return (a2 @ s3.astype(np.int64)) >> k3
         def qw(w):
             return np.clip(np.round(w * Q88_SCALE),
                            Q88_MIN, Q88_MAX).astype(np.int64)
-        Xr = np.clip(np.round(X * Q88_SCALE), Q88_MIN, Q88_MAX).astype(np.int64)
         w1r, w2r, w3r = qw(self.w1), qw(self.w2), qw(self.w3)
         # >> 8 is arithmetic (floor) on int64, matching SAR in the kernel
         z1 = ((Xr[:, :, None] * w1r[None, :, :]) >> 8).sum(axis=1)
@@ -401,11 +462,36 @@ class Tier2Network:
         vs = [np.zeros_like(w) for w in [self.w1, self.w2, self.w3]]
         beta1, beta2, eps = 0.9, 0.999, 1e-8
 
+        # Ternary checkpoint selection runs on a fixed held-out context
+        # sample (3 draws, ~1200 examples), not the current training batch:
+        # the training stream saturates at 100% and stops discriminating,
+        # while the gates measure generalization. Seed 555000 is distinct
+        # from the training stream and from the CI eval seed (99173) -
+        # selecting on the CI set would be leakage. Q8.8 keeps its
+        # historical selection verbatim (metric on the training batch,
+        # cadence 500): its canonical CRC must not move for a ternary fix.
+        if self.quant == 'ternary':
+            vrng = np.random.default_rng(555000)
+            val = [ex for _ in range(3) for ex in generate_training_data(vrng)]
+            Xv = np.array([d[0] for d in val], dtype=np.float32)
+            cv = np.argmax(np.array([d[1] for d in val],
+                                    dtype=np.float32)[:, :20], axis=1)
+
         best_acc = 0
         best_weights = None
         m = len(X)
 
         for epoch in range(epochs):
+            # Ternary: freeze the per-layer shifts after warmup so the
+            # integer law is stationary for the remaining epochs (the
+            # projection mask still adapts; the scale no longer teleports).
+            if self.quant == 'ternary' and self._frozen_k is None \
+                    and epoch == 200:
+                self._frozen_k = [ternary_project(w)[1] for w in
+                                  (self.w1, self.w2, self.w3)]
+                print(f"  Epoch {epoch:5d}: shifts frozen at "
+                      f"sar {self._frozen_k}")
+
             # Periodically redraw the random-context examples so the network
             # trains on the history distribution, not one frozen sample.
             if resample and epoch and epoch % resample_every == 0:
@@ -465,7 +551,17 @@ class Tier2Network:
                 v_hat = vs[i] / (1 - beta2 ** t_adam)
                 w -= cur_lr * m_hat / (np.sqrt(v_hat) + eps)
 
-            if epoch % 500 == 0 or epoch == epochs - 1:
+            if self.quant == 'ternary':
+                if epoch % 100 == 0 or epoch == epochs - 1:
+                    acc_q = self._qat_accuracy(Xv, cv)
+                    if acc_q >= best_acc:      # ties advance to more-trained
+                        best_acc = acc_q
+                        best_weights = (self.w1.copy(), self.w2.copy(),
+                                        self.w3.copy())
+                    if epoch % 500 == 0 or epoch == epochs - 1:
+                        print(f"  Epoch {epoch:5d}: loss={loss:.4f}  "
+                              f"heldout_acc={acc_q:.1f}%  best={best_acc:.1f}%")
+            elif epoch % 500 == 0 or epoch == epochs - 1:
                 acc_q = self._qat_accuracy(X, cls)
                 if acc_q >= best_acc:
                     best_acc = acc_q
@@ -557,41 +653,68 @@ class Tier2Network:
             print("⚠  >1% divergence — consider increasing quantization-aware epochs")
 
     def save(self, filename):
-        """Save weights in DNOS Tier 2 binary format."""
-        # Row-per-neuron layout (for each j, all i) == transpose, C-order.
-        def q(w):
-            v = np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX)
-            return v.T.astype('<i2').tobytes()
+        """Save weights in DNOS binary format (format 0 = Q8.8 int16,
+        format 1 = ternary 2-bit packed; header byte 20 disambiguates)."""
+        shifts = (0, 0, 0)
+        if self.quant == 'ternary':
+            # Row-per-neuron layout (transpose, C-order), then 4 weights
+            # per byte, weight i in bits 2·(i mod 4). Codes: 00=0, 01=+1,
+            # 11=-1; 10 is reserved and must never be written.
+            blocks = []
+            ks = []
+            for li, w in enumerate((self.w1, self.w2, self.w3)):
+                s, k = self._project(w, li)
+                ks.append(k)
+                flat = s.T.astype(np.int8).ravel()
+                codes = np.where(flat == 0, 0,
+                                 np.where(flat > 0, 1, 3)).astype(np.uint8)
+                assert not np.any(codes == 2), "reserved ternary code 10"
+                q = codes.reshape(-1, 4)
+                blocks.append((q[:, 0] | (q[:, 1] << 2) | (q[:, 2] << 4)
+                               | (q[:, 3] << 6)).astype(np.uint8).tobytes())
+            weight_data = bytearray(b"".join(blocks))
+            shifts = tuple(ks)
+            n_weights = (self.w1.size + self.w2.size + self.w3.size)
+            assert len(weight_data) == n_weights // 4, \
+                f"Packed size mismatch: {len(weight_data)}"
+        else:
+            # Row-per-neuron layout (for each j, all i) == transpose, C-order.
+            def q(w):
+                v = np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX)
+                return v.T.astype('<i2').tobytes()
 
-        weight_data = bytearray(q(self.w1) + q(self.w2) + q(self.w3))
+            weight_data = bytearray(q(self.w1) + q(self.w2) + q(self.w3))
 
-        assert len(weight_data) == WEIGHT_DATA_SIZE, \
-            f"Weight data size mismatch: {len(weight_data)} vs {WEIGHT_DATA_SIZE}"
+            assert len(weight_data) == WEIGHT_DATA_SIZE, \
+                f"Weight data size mismatch: {len(weight_data)} vs {WEIGHT_DATA_SIZE}"
 
-        # CRC32
+        # CRC32 (over the bytes as stored — packed for ternary)
         crc = crc32(weight_data)
 
         # Build header (128 bytes)
         header = bytearray(HEADER_SIZE)
         header[0:2] = b'DN'
-        header[2] = 3                    # Version
-        header[3] = 3                    # Tier
+        header[2] = 4 if self.quant == 'ternary' else 3   # Version
+        header[3] = 4 if self.quant == 'ternary' else 3   # Tier
         header[4] = 4                    # Num layers
         # Layer sizes as little-endian uint16
         struct.pack_into('<H', header, 5, INPUT_SIZE)
-        struct.pack_into('<H', header, 7, HIDDEN1_SIZE)
-        struct.pack_into('<H', header, 9, HIDDEN2_SIZE)
+        struct.pack_into('<H', header, 7, self.h1)
+        struct.pack_into('<H', header, 9, self.h2)
         struct.pack_into('<H', header, 11, OUTPUT_SIZE)
         # Activation types: 0=relu, 1=sigmoid
         header[13] = 0                   # Hidden1: ReLU
         header[14] = 0                   # Hidden2: ReLU
         header[15] = 1                   # Output: sigmoid
         # Total weight count
-        struct.pack_into('<I', header, 16, TOTAL_WEIGHTS)
-        # Weight format: 0=Q8.8
-        header[20] = 0
+        struct.pack_into('<I', header, 16,
+                         self.w1.size + self.w2.size + self.w3.size)
+        # Weight format: 0=Q8.8 int16, 1=ternary 2-bit packed
+        header[20] = 1 if self.quant == 'ternary' else 0
         # CRC32 of weight data
         struct.pack_into('<I', header, 21, crc)
+        # Per-layer post-accumulation shifts (ternary: `sar k` per neuron)
+        header[25], header[26], header[27] = shifts
 
         # Write file
         with open(filename, 'wb') as f:
@@ -599,14 +722,18 @@ class Tier2Network:
             f.write(weight_data)
 
             # Pad to sector-aligned size (512-byte boundary)
-            current = HEADER_SIZE + WEIGHT_DATA_SIZE
+            current = HEADER_SIZE + len(weight_data)
             target = ((current + 511) // 512) * 512
             f.write(bytes(target - current))
 
-        total = HEADER_SIZE + WEIGHT_DATA_SIZE
+        total = HEADER_SIZE + len(weight_data)
+        unit = "2-bit packed" if self.quant == 'ternary' else "int16"
+        n = self.w1.size + self.w2.size + self.w3.size
         print(f"\nSaved weights to {filename}")
         print(f"  Header:  {HEADER_SIZE} bytes")
-        print(f"  Weights: {WEIGHT_DATA_SIZE:,} bytes ({TOTAL_WEIGHTS:,} int16)")
+        print(f"  Weights: {len(weight_data):,} bytes ({n:,} {unit})")
+        if self.quant == 'ternary':
+            print(f"  Shifts:  sar {shifts[0]}, {shifts[1]}, {shifts[2]}")
         print(f"  Total:   {total:,} bytes")
         print(f"  CRC32:   0x{crc:08X}")
 
@@ -648,25 +775,55 @@ def simulate_assembly_forward(weights_file, input_vec):
     cached = _SIM_CACHE.get("key") == key
     if not cached:
         with open(weights_file, 'rb') as f:
-            f.read(HEADER_SIZE)
-            raw = f.read(WEIGHT_DATA_SIZE)
-        w = np.frombuffer(raw, dtype='<i2').astype(np.int64)
+            header = f.read(HEADER_SIZE)
+            fmt = header[20]
+            # Topology comes from the header - the format's own contract -
+            # not from module constants. (The kernel does the same.)
+            n_in, n_h1, n_h2, n_out = struct.unpack_from('<HHHH', header, 5)
+            n_weights = struct.unpack_from('<I', header, 16)[0]
+            c1, c2 = n_in * n_h1, n_h1 * n_h2
+            if fmt == 1:                       # ternary 2-bit packed
+                raw = f.read(n_weights // 4)
+                packed = np.frombuffer(raw, dtype=np.uint8)
+                codes = np.empty(n_weights, dtype=np.uint8)
+                for j in range(4):             # weight i in bits 2·(i mod 4)
+                    codes[j::4] = (packed >> (2 * j)) & 0x3
+                if np.any(codes == 2):
+                    raise ValueError("reserved ternary code 10 in weight "
+                                     "blob - refusing to run inference")
+                w = np.where(codes == 0, 0,
+                             np.where(codes == 1, 1, -1)).astype(np.int64)
+                shifts = (header[25], header[26], header[27])
+            else:                              # Q8.8 int16
+                raw = f.read(n_weights * 2)
+                w = np.frombuffer(raw, dtype='<i2').astype(np.int64)
+                shifts = None
         # Row-per-neuron on disk: reshape to (out, in), transpose to (in, out)
-        w1 = w[:W1_COUNT].reshape(HIDDEN1_SIZE, INPUT_SIZE).T
-        w2 = w[W1_COUNT:W1_COUNT + W2_COUNT].reshape(HIDDEN2_SIZE, HIDDEN1_SIZE).T
-        w3 = w[W1_COUNT + W2_COUNT:].reshape(OUTPUT_SIZE, HIDDEN2_SIZE).T
-        _SIM_CACHE.update(key=key, w1=w1, w2=w2, w3=w3)
+        w1 = w[:c1].reshape(n_h1, n_in).T
+        w2 = w[c1:c1 + c2].reshape(n_h2, n_h1).T
+        w3 = w[c1 + c2:].reshape(n_out, n_h2).T
+        _SIM_CACHE.update(key=key, w1=w1, w2=w2, w3=w3, shifts=shifts)
     w1, w2, w3 = _SIM_CACHE["w1"], _SIM_CACHE["w2"], _SIM_CACHE["w3"]
+    shifts = _SIM_CACHE["shifts"]
 
     inp_q = np.clip(np.round(input_vec * Q88_SCALE), Q88_MIN, Q88_MAX).astype(np.int64)
 
-    def layer(act, wmat):
-        # (in,1) * (in,out) -> per-term products, sar 8 each, sum columns
-        return ((act[:, None] * wmat) >> 8).sum(axis=0)
-
-    h1 = np.clip(layer(inp_q, w1), 0, 32767)          # ReLU + clamp
-    h2 = np.clip(layer(h1, w2), 0, 32767)
-    acc = layer(h2, w3)                                # piecewise sigmoid
+    if shifts is not None:
+        # Ternary law: terms are ±activation (already Q8.8) — accumulate
+        # with add/sub, then ONE arithmetic shift per neuron (`sar k`).
+        def layer(act, wmat, k):
+            return (act @ wmat) >> k
+        h1 = np.clip(layer(inp_q, w1, shifts[0]), 0, 32767)
+        h2 = np.clip(layer(h1, w2, shifts[1]), 0, 32767)
+        acc = layer(h2, w3, shifts[2])
+    else:
+        # Q8.8 law: products are Q16.16 — per-term sar 8, then sum.
+        def layer(act, wmat):
+            # (in,1) * (in,out) -> per-term products, sar 8 each, sum columns
+            return ((act[:, None] * wmat) >> 8).sum(axis=0)
+        h1 = np.clip(layer(inp_q, w1), 0, 32767)      # ReLU + clamp
+        h2 = np.clip(layer(h1, w2), 0, 32767)
+        acc = layer(h2, w3)                            # piecewise sigmoid
     output = np.where(acc < -8192, 0,
              np.where(acc > 8192, 32767, (acc + 8192) << 1)).astype(np.int32)
     return output
@@ -720,8 +877,9 @@ def main():
             pass
 
     parser = argparse.ArgumentParser(description='DNOS Tier 3 Weight Generator')
-    parser.add_argument('--epochs', type=int, default=4000,
-                        help='Training epochs (default: 4000)')
+    parser.add_argument('--epochs', type=int, default=6000,
+                        help='Training epochs (default: 6000 - the canonical '
+                             'Q8.8 config for the full-window distribution)')
     parser.add_argument('--lr', type=float, default=0.02,
                         help='Learning rate (default: 0.02)')
     parser.add_argument('--output', type=str, default='weights.bin',
@@ -731,6 +889,23 @@ def main():
     parser.add_argument('--seed', type=int, default=1337,
                         help='RNG seed for reproducible canonical weights '
                              '(default: 1337)')
+    parser.add_argument('--ternary', action='store_true',
+                        help='Tier 4a: train ternary weights ({-1,0,+1}, '
+                             '2-bit packed, multiply-free inference)')
+    parser.add_argument('--ternary-thresh', type=float, default=0.75,
+                        help='Ternary projection threshold as a fraction of '
+                             'mean|w| (lower = denser +/-1 mask; training-'
+                             'time only, invisible to the saved law)')
+    parser.add_argument('--resample-every', type=int, default=25,
+                        help='Epochs between context resamples (lower = '
+                             'more of the history distribution seen; 25 is '
+                             'the canonical config)')
+    parser.add_argument('--h1', type=int, default=HIDDEN1_SIZE,
+                        help='Hidden layer 1 width (ternary compensates '
+                             '1.58-bit weights with width; Q8.8 canonical '
+                             'topology must stay at the default)')
+    parser.add_argument('--h2', type=int, default=HIDDEN2_SIZE,
+                        help='Hidden layer 2 width')
     args = parser.parse_args()
 
     # Deterministic NOS: fixed seed → identical "canonical" weights every build.
@@ -750,8 +925,11 @@ def main():
     # every resample interval — deterministic overall (fixed seed), but the
     # network sees a stream of histories instead of one frozen sample.
     ctx_stream = np.random.default_rng(20260610)
-    net = Tier2Network()
+    net = Tier2Network(quant='ternary' if args.ternary else 'q88',
+                       ternary_thresh=args.ternary_thresh,
+                       hidden=(args.h1, args.h2))
     net.train(data, epochs=args.epochs, lr=args.lr,
+              resample_every=args.resample_every,
               resample=lambda: generate_training_data(ctx_stream))
     net.test(data)
     net.save(args.output)

@@ -36,8 +36,50 @@ decoded behavior may differ because the law differs).
   portability and debuggability properties live there and are kept.
 - **Training:** quantization-aware with STE over a ternary projection
   (threshold at ±Δ·mean|w|, BitNet-b1.58 style), seeded as ever.
-  `train.py --ternary`; the projection threshold is part of the header
-  so the simulator and the metal agree on the law by construction.
+  `train.py --ternary`. **Amendment (implementation finding):** the
+  per-layer shift k must be *frozen after a short warmup* (200 epochs).
+  Recomputing k from the live shadow weights makes the layer scale
+  jump 2× whenever mean|w| crosses a power-of-two boundary — observed
+  as oscillating accuracy (best 41.7% at 4000 epochs); freezing k
+  restores monotonic convergence (100% integer-law accuracy by 1500).
+  The threshold Δ stays dynamic — mask churn is local and harmless;
+  scale churn is global and fatal. Only the shifts land in the header;
+  Δ is a training-time detail invisible to the law.
+  **Further campaign findings (2026-07-08, all runs seeded):**
+  (a) *Density hurts*: Δ=0.5 (denser ±1 mask) scored strictly worse
+  than Δ=0.75 at equal epochs (38.8% vs 49.3% held-out contexts) —
+  sparser ternary carries cleaner signal here; Δ=0.75 is the default.
+  (b) *Coverage dominates*: halving the resample interval (50→25)
+  moved held-out contexts 82.6%→91.4% at equal epochs — worth more
+  than +2000 epochs. Ternary defaults to `--resample-every 25`.
+  (c) *Checkpoint selection must be held-out and quarantined*:
+  selecting on the training stream stops discriminating at saturation
+  (canonical suite regressed while contexts improved). Ternary selects
+  on a fixed 3-draw held-out context sample (seed 555000 — distinct
+  from the CI eval seed 99173; selecting on the CI set would be
+  leakage), ties advancing to more-trained weights. Q8.8 keeps its
+  historical selection verbatim: the canonical CRC 0xB674A6AF was
+  reproduced bit-exactly after the quarantine, proving the shipped
+  law is untouched by any ternary-mode code path.
+  (e) **Ternary as a bug detector — the campaign's largest finding.**
+  The persistent 38x/386 plateau with wandering misses was not a
+  ternary capacity ceiling: training histories were capped at 31
+  events while the Tier 3 window, the eval, and live use span 64 —
+  the deep half of the window trained as permanent zeros. Q8.8 had
+  the precision slack to interpolate over the gap; 1.58-bit weights
+  did not, and surfaced it. Fixing the cap made the task honest and
+  *upgraded the canonical Q8.8 law itself*: 386/386 with held-out
+  context generalization 99.9% (was 98.4%), canonical config now
+  6000 epochs / resample 25 (the bare `train.py` defaults), CRC
+  0xE07DA759 (supersedes 0xB674A6AF), full live gauntlet re-verified.
+  Reduced precision is an audit instrument: what interpolation can
+  hide, quantization exposes.
+  (d) *Cross-environment reproducibility (observed, not guaranteed)*:
+  the Q8.8 canonical CRC is bit-identical between the cloud session's
+  environment and this machine's numpy 2.5 — strong evidence for S2
+  replay-verification across verifiers, but float-trajectory
+  portability across BLAS builds is not a theorem; S2's dataset-delta
+  design should still pin or attest the verifier environment.
 - **Kernel:** the inner loop walks packed 2-bit weights: 00 → skip,
   01 → `add`, 11 → `sub`. No unpack buffer — walk packed directly
   (4 weights per byte, shift-and-mask). No `imul` anywhere in

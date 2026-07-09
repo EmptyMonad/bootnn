@@ -28,6 +28,9 @@ jobs:
       - name: Context-generalization eval (held-out random histories)
         run: python3 tools/context_eval.py --min-accuracy 95
 
+      - name: Ternary format gate (Tier 4a law - bit-exact, self-rejecting)
+        run: python3 tools/ternary_format_test.py
+
       - name: Build image (assemble + patch weights + pad)
         run: python3 tools/build.py
 
