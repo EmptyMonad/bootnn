@@ -74,6 +74,26 @@ decoded behavior may differ because the law differs).
   0xE07DA759 (supersedes 0xB674A6AF), full live gauntlet re-verified.
   Reduced precision is an audit instrument: what interpolation can
   hide, quantization exposes.
+  (f) **Windowed-ternary retired as a canonical-law candidate
+  (2026-07-09).** After a controlled campaign (epochs to 16k, width to
+  2048, resample cadence, freeze timing, density, held-out selection),
+  the best windowed-ternary law reached 375/386 canonical / 94.9%
+  held-out — under the gates, with a *structural* explanation: the
+  task demands that recent events outweigh deep history, Q8.8 encodes
+  that ratio in weight magnitudes, and ternary weights have none —
+  uniform-loudness connections cannot express a fade-out across the
+  64-event window, and no training schedule adds expressiveness the
+  format lacks. (Freeze-later was also refuted: pinning at epoch 1000
+  let the output scale drift to sar 0 — 272/386. Early freeze wins.)
+  Per-neuron shifts (format v4b, header[28]=1, byte table between
+  header and weights, CRC over both) are implemented and bit-exact in
+  the format gate, but they adjust per-neuron gain, not the
+  recent-vs-ancient ratio within a neuron — so the canonical ternary
+  law is deferred to **Part B, where decay is architectural**: the
+  recurrent state fades old information per tick, ternary weights
+  encode only *what* to detect, and the window (the thing demanding
+  magnitudes) is deleted. Part A and Part B are one design on this
+  task, not two milestones.
   (d) *Cross-environment reproducibility (observed, not guaranteed)*:
   the Q8.8 canonical CRC is bit-identical between the cloud session's
   environment and this machine's numpy 2.5 — strong evidence for S2
@@ -134,20 +154,40 @@ y(t)   = MLP(h(t+1))                     (existing readout, smaller)
 | Swarm S0 | state vector grows to include `h` digest — replication now covers memory |
 | Serial S1 / client | unchanged (the boundary is frozen; that is the point of having landed it first) |
 
-## Open questions (resolve before implementation)
+## Open questions — resolutions (2026-07-09)
 
-1. **The event unit** (fixes S1 v1 framing): stay at 8 features = the
-   key byte, or widen to an 8-byte token (key + modifiers + device id
-   + reserved)? Widening retrains everything; do it here or not at all.
-2. **h width:** 512 channels is the working default; measure 256 vs
-   512 on the streaming eval before committing the memory map.
-3. **Sequencing:** land Part A alone first (same topology, ternary
-   weights — smallest diff that retires `imul`), or one retrain for
-   A+B? Lean: A first, gauntlet green, then B — two small revolutions
-   beat one large one.
-4. **Demo sequence:** the boot demo's expected outputs change with the
-   new law; regenerate the demo assertions from the simulator rather
-   than hand-maintaining them.
+1. **Event unit: RESOLVED — stays 8 features = the key byte.** The S1
+   v1 frame is therefore `[version byte][event byte]`; nothing widens.
+2. **h width:** 512 channels default; the lab measures 256 vs 512.
+3. **Sequencing: RESOLVED by the Part A campaign — one retrain, A+B
+   together.** Windowed-ternary is structurally mismatched (finding f);
+   the ternary law ships with the recurrent core or not at all.
+4. **Demo sequence:** regenerate demo assertions from the simulator.
+
+## Part B integer law (design of record for the lab)
+
+```
+h: 512 x int16 (Q8.8), zeroed at boot; JOINS canonical state.
+Per tick, event x = 8 features in {0, 256}:
+  leak:   hl[c] = h[c] - (h[c] >> d[c])     ; lambda_c = 1 - 2^-d_c
+  drive:  u[c]  = (sum_i s_in[i,c] * x[i]) >> k_in
+  h'[c]  = clamp(hl[c] + u[c], -32768, 32767)
+  y      = Tier 4a ternary MLP readout on h' (512->1024->384->64)
+```
+
+- `d` is a **structural decay spectrum**, not trained: 8 log-spaced
+  values d in {1..8} (horizons ~2 to ~256 ticks), 64 channels each.
+  Stored as a byte table (v4b mechanism); shift-subtract is exact in
+  int16, no multiply anywhere.
+- `s_in` is ternary 8x512; with <=8 terms of +/-256 the drive needs
+  headroom, not precision — k_in is per-layer (v4a mechanism).
+- Training is truncated BPTT (float shadow, STE, loss at final step);
+  the gradient horizon is a training detail — the machine has none.
+- **Known risk for the lab to measure:** h is a leaky superposition —
+  order sensitivity (line vs nile) now lives only in decay
+  differences, where the window encoded position explicitly. If word
+  commands suffer, the cheap remedy is a 2-tap drive (x(t) and
+  x(t-1) both feed W_in: 16x512), before anything heavier.
 
 ## Exit criteria
 

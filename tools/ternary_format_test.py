@@ -50,9 +50,14 @@ def main():
     tmp = Path(tempfile.mkdtemp())
     failures = []
 
-    for name, hidden in [("canonical", (1024, 384)), ("wide", (2048, 512))]:
+    cases = [("canonical", (1024, 384), False),
+             ("wide", (2048, 512), False),
+             ("canonical-v4b", (1024, 384), True),
+             ("wide-v4b", (2048, 512), True)]
+    for name, hidden, per_neuron in cases:
         np.random.seed(1234)
-        net = Tier2Network(quant='ternary', hidden=hidden)
+        net = Tier2Network(quant='ternary', hidden=hidden,
+                           per_neuron_shifts=per_neuron)
         ok = bit_exact(net, tmp / f"{name}.bin", X)
         print(f"[ternary_format] {name} {hidden}: "
               f"{'BIT-EXACT' if ok else 'DIVERGED'} "

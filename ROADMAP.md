@@ -163,16 +163,23 @@ conversation. Order is deliberate.
    ternary exposed a training-data defect (histories capped at 31 of
    64 events) whose fix **upgraded the canonical Q8.8 law** to 99.9%
    held-out generalization (CRC 0xE07DA759, defaults 6000/25, full
-   live gauntlet re-verified). Remaining: a ternary config that
-   clears 386/386 + ≥95% on the honest task (width/epoch search in
-   progress), then the kernel packed-walk inner loop (commit 2 —
-   add/sub/skip, no `imul` in inference, boot-time v4a validation,
-   integrity negative tests on metal).
-2. 📋 **Tier 4 Part B — diagonal SSM core** (TIER4_DESIGN, Part B):
-   resolve OQ1 (event unit) FIRST — it fixes the S1 v1 token frame;
-   then `h` (512×int16, `h_base` exported, in the swarm digest),
-   decay spectrum `λ = 1-2^-k`, delete the history window, stateful
-   simulator, streaming generalization eval.
+   live gauntlet re-verified). **Windowed-ternary retired** after a
+   controlled campaign (TIER4_DESIGN finding f): uniform-magnitude
+   weights cannot express recency across a spatial window; the
+   canonical ternary law ships with Part B's recurrent core, where
+   decay is architectural. Format v4b (per-neuron shift tables)
+   landed and format-gated. The kernel packed-walk inner loop lands
+   together with Part B (one engine change, one retrain).
+2. 🚧 **Tier 4 Part B — diagonal SSM core** (TIER4_DESIGN, "Part B
+   integer law"): OQ1 resolved (event unit stays the key byte; S1 v1
+   frame = version byte + event byte). Integer law specified:
+   shift-subtract decay spectrum (structural, 8 log-spaced horizons),
+   ternary drive + ternary MLP readout, `h` (512×int16) joins
+   canonical state and the swarm digest. Next: `tools/ssm_lab.py`
+   feasibility (BPTT trainer + stateful integer twin, measured on the
+   canonical suite + held-out streams; watch order-sensitivity of
+   word commands — 2-tap drive is the fallback), then graduate into
+   train.py as format v5 + kernel recurrent tick.
 3. 📋 **S1 v1 — versioned IAL token framing** (unblocked by item 2):
    frame = version byte + the Tier 4 event features; kernel framer on
    COM1; `dnos_client.py` and the Rust IAL emit it; serial_test

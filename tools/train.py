@@ -269,20 +269,30 @@ def sigmoid_piecewise_deriv(x):
     mask = (x > -32.0) & (x < 32.0)
     return mask.astype(np.float32) / 64.0
 
-def ternary_project(w, thresh_scale=0.75):
-    """Project a float weight matrix onto {-1, 0, +1} with a per-layer
-    power-of-two scale (Tier 4 Part A, docs/TIER4_DESIGN.md).
+def ternary_project(w, thresh_scale=0.75, per_neuron=False):
+    """Project a float weight matrix onto {-1, 0, +1} with power-of-two
+    scales (Tier 4 Part A, docs/TIER4_DESIGN.md).
 
     s = sign(w) where |w| > Δ (Δ = thresh_scale · mean|w|), else 0.
-    The scale is the power of two nearest the mean surviving magnitude:
-    k = round(-log2(mean|w[s≠0]|)), clamped to [0, 15] — applied on
-    metal as a single `sar k` per neuron after add/sub accumulation.
-    Returns (s as float ±1/0, k as int)."""
+    Scales are the power of two nearest the mean surviving magnitude,
+    k = round(-log2(mean|w[s≠0]|)) clamped to [0, 15], applied on metal
+    as `sar k` after add/sub accumulation. per_neuron=False: one k per
+    layer (v4a). per_neuron=True: one k per output neuron, from that
+    neuron's own incoming magnitudes (v4b) — 16x finer scale
+    resolution, same instruction, k read from a byte table.
+    Returns (s as float ±1/0, k as int or int array of len w.shape[1])."""
     delta = thresh_scale * np.mean(np.abs(w))
     s = np.sign(w) * (np.abs(w) > delta)
-    nz = np.abs(w[s != 0])
-    alpha = nz.mean() if nz.size else 1.0
-    k = int(np.clip(np.round(-np.log2(alpha)), 0, 15))
+    if per_neuron:
+        mag = np.abs(w) * (s != 0)
+        cnt = np.maximum((s != 0).sum(axis=0), 1)
+        alpha = np.where(cnt > 0, mag.sum(axis=0) / cnt, 1.0)
+        alpha = np.where(alpha > 0, alpha, 1.0)
+        k = np.clip(np.round(-np.log2(alpha)), 0, 15).astype(np.int64)
+    else:
+        nz = np.abs(w[s != 0])
+        alpha = nz.mean() if nz.size else 1.0
+        k = int(np.clip(np.round(-np.log2(alpha)), 0, 15))
     return s.astype(np.float32), k
 
 
@@ -296,9 +306,12 @@ class Tier2Network:
     Activations and accumulators are Q8.8 int16 / int32 in both."""
 
     def __init__(self, quant='q88', ternary_thresh=0.75,
-                 hidden=(HIDDEN1_SIZE, HIDDEN2_SIZE)):
+                 hidden=(HIDDEN1_SIZE, HIDDEN2_SIZE), ternary_freeze=200,
+                 per_neuron_shifts=False):
         self.quant = quant
         self.ternary_thresh = ternary_thresh
+        self.ternary_freeze = ternary_freeze
+        self.per_neuron_shifts = per_neuron_shifts
         # Hidden widths are an instance parameter (ternary compensates
         # 1.58-bit weights with width; the Q8.8 canonical topology is
         # frozen). The header carries the sizes; the simulator reads them
@@ -376,8 +389,9 @@ class Tier2Network:
         return np.mean((self.a3 - y) ** 2)
 
     def _project(self, w, li):
-        """Ternary projection with the layer's frozen shift, once frozen."""
-        s, k = ternary_project(w, self.ternary_thresh)
+        """Ternary projection with the layer's frozen shift(s), once frozen."""
+        s, k = ternary_project(w, self.ternary_thresh,
+                               per_neuron=self.per_neuron_shifts)
         if self._frozen_k is not None:
             k = self._frozen_k[li]
         return s, k
@@ -389,7 +403,7 @@ class Tier2Network:
         so the whole QAT loop is shared between formats."""
         if self.quant == 'ternary':
             s, k = self._project(w, li)
-            return (2.0 ** -k) * s
+            return (2.0 ** -np.asarray(k, dtype=np.float64)) * s
         return np.clip(np.round(w * Q88_SCALE), Q88_MIN, Q88_MAX) / Q88_SCALE
 
     def _qat_forward(self, X, quantize=True):
@@ -486,11 +500,14 @@ class Tier2Network:
             # integer law is stationary for the remaining epochs (the
             # projection mask still adapts; the scale no longer teleports).
             if self.quant == 'ternary' and self._frozen_k is None \
-                    and epoch == 200:
-                self._frozen_k = [ternary_project(w)[1] for w in
-                                  (self.w1, self.w2, self.w3)]
-                print(f"  Epoch {epoch:5d}: shifts frozen at "
-                      f"sar {self._frozen_k}")
+                    and epoch == self.ternary_freeze:
+                self._frozen_k = [
+                    ternary_project(w, self.ternary_thresh,
+                                    per_neuron=self.per_neuron_shifts)[1]
+                    for w in (self.w1, self.w2, self.w3)]
+                desc = ([f"{np.min(k)}..{np.max(k)}" for k in self._frozen_k]
+                        if self.per_neuron_shifts else self._frozen_k)
+                print(f"  Epoch {epoch:5d}: shifts frozen at sar {desc}")
 
             # Periodically redraw the random-context examples so the network
             # trains on the history distribution, not one frozen sample.
@@ -672,11 +689,20 @@ class Tier2Network:
                 q = codes.reshape(-1, 4)
                 blocks.append((q[:, 0] | (q[:, 1] << 2) | (q[:, 2] << 4)
                                | (q[:, 3] << 6)).astype(np.uint8).tobytes())
-            weight_data = bytearray(b"".join(blocks))
-            shifts = tuple(ks)
+            packed = b"".join(blocks)
             n_weights = (self.w1.size + self.w2.size + self.w3.size)
-            assert len(weight_data) == n_weights // 4, \
-                f"Packed size mismatch: {len(weight_data)}"
+            assert len(packed) == n_weights // 4, \
+                f"Packed size mismatch: {len(packed)}"
+            if self.per_neuron_shifts:
+                # v4b: per-neuron shift table (one byte per neuron, layer
+                # order) sits between header and packed weights; both are
+                # law, so the CRC covers table + weights together.
+                table = np.concatenate(
+                    [np.asarray(k, dtype=np.uint8) for k in ks]).tobytes()
+                weight_data = bytearray(table + packed)
+            else:
+                weight_data = bytearray(packed)
+            shifts = tuple(ks)
         else:
             # Row-per-neuron layout (for each j, all i) == transpose, C-order.
             def q(w):
@@ -713,8 +739,13 @@ class Tier2Network:
         header[20] = 1 if self.quant == 'ternary' else 0
         # CRC32 of weight data
         struct.pack_into('<I', header, 21, crc)
-        # Per-layer post-accumulation shifts (ternary: `sar k` per neuron)
-        header[25], header[26], header[27] = shifts
+        # Post-accumulation shifts. header[28]: 0 = per-layer (k in bytes
+        # 25-27), 1 = per-neuron (byte table between header and weights,
+        # one k per neuron in layer order; bytes 25-27 zero).
+        if self.quant == 'ternary' and self.per_neuron_shifts:
+            header[28] = 1
+        elif self.quant == 'ternary':
+            header[25], header[26], header[27] = shifts
 
         # Write file
         with open(filename, 'wb') as f:
@@ -733,7 +764,11 @@ class Tier2Network:
         print(f"  Header:  {HEADER_SIZE} bytes")
         print(f"  Weights: {len(weight_data):,} bytes ({n:,} {unit})")
         if self.quant == 'ternary':
-            print(f"  Shifts:  sar {shifts[0]}, {shifts[1]}, {shifts[2]}")
+            if self.per_neuron_shifts:
+                print("  Shifts:  per-neuron, sar "
+                      + ", ".join(f"{np.min(k)}..{np.max(k)}" for k in shifts))
+            else:
+                print(f"  Shifts:  sar {shifts[0]}, {shifts[1]}, {shifts[2]}")
         print(f"  Total:   {total:,} bytes")
         print(f"  CRC32:   0x{crc:08X}")
 
@@ -783,6 +818,14 @@ def simulate_assembly_forward(weights_file, input_vec):
             n_weights = struct.unpack_from('<I', header, 16)[0]
             c1, c2 = n_in * n_h1, n_h1 * n_h2
             if fmt == 1:                       # ternary 2-bit packed
+                if header[28] == 1:            # v4b: per-neuron shift table
+                    table = np.frombuffer(
+                        f.read(n_h1 + n_h2 + n_out), dtype=np.uint8
+                    ).astype(np.int64)
+                    shifts = (table[:n_h1], table[n_h1:n_h1 + n_h2],
+                              table[n_h1 + n_h2:])
+                else:                          # v4a: one k per layer
+                    shifts = (header[25], header[26], header[27])
                 raw = f.read(n_weights // 4)
                 packed = np.frombuffer(raw, dtype=np.uint8)
                 codes = np.empty(n_weights, dtype=np.uint8)
@@ -793,7 +836,6 @@ def simulate_assembly_forward(weights_file, input_vec):
                                      "blob - refusing to run inference")
                 w = np.where(codes == 0, 0,
                              np.where(codes == 1, 1, -1)).astype(np.int64)
-                shifts = (header[25], header[26], header[27])
             else:                              # Q8.8 int16
                 raw = f.read(n_weights * 2)
                 w = np.frombuffer(raw, dtype='<i2').astype(np.int64)
@@ -906,6 +948,14 @@ def main():
                              'topology must stay at the default)')
     parser.add_argument('--h2', type=int, default=HIDDEN2_SIZE,
                         help='Hidden layer 2 width')
+    parser.add_argument('--ternary-freeze', type=int, default=200,
+                        help='Epoch at which per-layer shifts freeze '
+                             '(later = scales settle nearer their trained '
+                             'magnitudes before the law is pinned)')
+    parser.add_argument('--per-neuron-shifts', action='store_true',
+                        help='v4b: one sar count per neuron from its own '
+                             'row magnitudes (byte table after header) - '
+                             '16x finer scale resolution, still no imul')
     args = parser.parse_args()
 
     # Deterministic NOS: fixed seed → identical "canonical" weights every build.
@@ -927,7 +977,9 @@ def main():
     ctx_stream = np.random.default_rng(20260610)
     net = Tier2Network(quant='ternary' if args.ternary else 'q88',
                        ternary_thresh=args.ternary_thresh,
-                       hidden=(args.h1, args.h2))
+                       hidden=(args.h1, args.h2),
+                       ternary_freeze=args.ternary_freeze,
+                       per_neuron_shifts=args.per_neuron_shifts)
     net.train(data, epochs=args.epochs, lr=args.lr,
               resample_every=args.resample_every,
               resample=lambda: generate_training_data(ctx_stream))
