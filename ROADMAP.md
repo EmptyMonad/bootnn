@@ -251,6 +251,41 @@ conversation. Order is deliberate.
    end of the demo sequence; network-driven color drift during the demo can
    no longer leave color == background for the interactive session.
 
+## The decade view (2026 → 2036)
+
+What we believe holds, and what we expect to shed, on a 10-year
+horizon. Vision-tier: recorded so future decisions can disagree with
+it explicitly.
+
+- **The law is the asset; the x86 kernel is scaffolding.** Legacy BIOS
+  boot is a dying substrate (post-quantum-era hardware will be
+  UEFI/RISC-V). The durable artifacts are the integer law, the
+  formats, the log, and the gauntlet — all already substrate-neutral
+  because the simulator defines semantics. The named second target is
+  **RISC-V** (open ISA, formally verifiable cores): the same law as a
+  second hardware profile is also what makes the S2 portability mint
+  real. Endgame: the tick as a hardware clock domain — determinism by
+  construction, not discipline. (The memristive vision stays: a
+  multiply-free ternary law is exactly what analog crossbars want.)
+- **Integer-exact training** is the missing half of environment-free
+  determinism: inference is already portable by construction; float
+  BPTT pins the trainer to a BLAS. Research item, high value for S2.
+- **The certifiable-AI wedge.** The gauntlet is, in substance, a
+  certification harness for neural computation (bit-exact replay,
+  self-rejecting artifacts, differential law-vs-metal). In a decade,
+  regulated domains will demand exactly this. That — not desktop
+  computing — is DNOS's most plausible first real-world payload.
+- **Events will outgrow keystrokes.** The v1 frame's version byte is
+  the hedge; the event unit will be renegotiated (sensors, tools,
+  inter-node messages) without breaking a single recorded log.
+- **Tokens die; rails survive.** Mint-on-verified-replay is a bet on
+  the primitive (verifiable compute), not on a currency. PQ crypto at
+  the boundary (ML-DSA / SPHINCS+) matches the 2035 migration
+  deadlines almost exactly.
+- **Scale-out stays the bet.** The 2036 counter-thesis to trillion-
+  weight monoliths is many small verified laws with routing (S3) —
+  swarms whose *memories* replicate bit-exactly, as of this commit.
+
 ## How correctness is enforced
 
 | Gate | Mechanism |
