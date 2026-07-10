@@ -197,10 +197,17 @@ conversation. Order is deliberate.
    seeds `SsmMachine` in the differential tests). Remaining (d): fold
    `h` into the swarm digest (`h_state` exported at 0x60000; digest
    is still state-vector-only) and re-measure the per-tick budget.
-3. 📋 **S1 v1 — versioned IAL token framing** (unblocked by item 2):
-   frame = version byte + the Tier 4 event features; kernel framer on
-   COM1; `dnos_client.py` and the Rust IAL emit it; serial_test
-   extended to frame level.
+3. ✅ **S1 v1 — versioned wire framing**: every event on COM1 is
+   `[0xD1][event byte]` — the version byte doubles as the frame
+   marker (above the ASCII event range, so desynced or unframed
+   streams self-correct by discard, counted in `serial_bad_frames`).
+   The ring still carries bare events: framing is a wire concern.
+   `dnos_client.frame()` is the single wire-protocol authority;
+   serial_test gates the negative (unframed byte → counted bad, node
+   state bit-unchanged, h included). Remaining niche: the Rust IAL
+   crate should emit frames too (cargo still untested anywhere).
+   Swarm digests now include **h_crc** — replication covers working
+   memory itself, not just observable outputs.
 4. 🚧 **S2 — contribution log + mint prototype**: core **landed**
    (`tools/ledger.py` + `tools/ledger_test.py`, in CI) — hash-chained
    JSONL log, claims are training tuples, verification is replay

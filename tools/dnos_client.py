@@ -45,6 +45,16 @@ from train import CMD_NAMES, SsmMachine         # noqa: E402
 
 IMAGE = ROOT / "dnos.img"
 WEIGHTS = ROOT / "weights_ssm.bin"
+
+# S1 v1 wire framing: every event is [FRAME_V1][event byte]. The marker
+# sits above the ASCII event range; a desynced stream self-corrects by
+# discard on the kernel side. THE wire-protocol constant - serial_test
+# imports it from here.
+FRAME_V1 = 0xD1
+
+
+def frame(byte):
+    return bytes([FRAME_V1, byte])
 SYMBOLS = ROOT / "dnos_symbols.json"
 SESSIONS = ROOT / "sessions"
 
@@ -145,7 +155,7 @@ def main():
     def step(byte):
         nonlocal mismatches, sent
         expected = int(np.argmax(machine.step(byte)[:20]))
-        node.wire.sendall(bytes([byte]))
+        node.wire.sendall(frame(byte))
         sent += 1
         if log_f:
             log_f.write(json.dumps({"type": "event", "event": byte}) + "\n")

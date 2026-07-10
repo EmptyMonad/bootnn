@@ -934,14 +934,18 @@ setup_serial:
     ret
 
 ;---------------------------------------
-; Drain pending COM1 bytes into the shared event ring (bounded).
-; Producer twin of keyboard_isr: bytes arriving on the wire are already
-; events (ASCII, v0 framing); NUL is discarded exactly like an unmapped
-; scancode. Consumption stays one event per tick in the main loop —
-; this only moves bytes from the 16-byte UART FIFO into the 256-byte
-; ring so agent-rate bursts are absorbed, not dropped.
+; Drain pending COM1 frames into the shared event ring (bounded).
+; S1 v1 framing: each event arrives as [FRAME_V1][event byte]. The
+; version byte doubles as the frame marker — it sits above the ASCII
+; event range, so a desynced or unframed stream self-corrects by
+; discard (counted in serial_bad_frames, a telemetry cell for tests).
+; The ring itself still carries bare events: framing is a wire
+; concern; keyboard_isr produces events without frames. Consumption
+; stays one event per tick in the main loop.
 ; Clobbers: EAX, EBX, ECX, EDX.
 ;---------------------------------------
+FRAME_V1        equ 0xD1        ; version-1 frame marker (>= 0x80: no
+                                ; collision with ASCII event bytes)
 serial_drain:
     cmp byte [serial_present], 0
     je .done
@@ -953,14 +957,29 @@ serial_drain:
     jz .done
     mov dx, SERIAL_BASE
     in al, dx                   ; RBR
-    test al, al                 ; discard NUL
-    jz .cont
+    cmp byte [serial_frame_state], 0
+    jne .expect_event
+    cmp al, FRAME_V1            ; awaiting header: must be the marker
+    jne .bad
+    mov byte [serial_frame_state], 1
+    jmp .cont
+.expect_event:
+    mov byte [serial_frame_state], 0
+    test al, al                 ; NUL event: discard like an unmapped key
+    jz .bad
+    cmp al, FRAME_V1            ; marker where an event should be:
+    je .resync                  ; treat as header of the NEXT frame
     movzx ebx, word [kb_write_idx]
     mov [KEYBUF_BASE + ebx], al
     inc bx
     and bx, 0xFF                ; wrap at 256, same ring discipline
     mov [kb_write_idx], bx
     inc dword [serial_rx_count]
+    jmp .cont
+.resync:
+    mov byte [serial_frame_state], 1
+.bad:
+    inc dword [serial_bad_frames]
 .cont:
     loop .next
 .done:
@@ -2127,7 +2146,9 @@ kb_read_idx:    dw 0
 kb_write_idx:   dw 0
 
 serial_present: db 0            ; UART probe result (0 = never poll)
-serial_rx_count: dd 0           ; COM1 bytes accepted into the event ring
+serial_rx_count: dd 0           ; COM1 events accepted into the ring
+serial_frame_state: db 0        ; v1 framing: 0 = expect header, 1 = event
+serial_bad_frames: dd 0         ; discarded bytes (bad header / NUL event)
 
 ; v5 recurrent law state
 cur_key:        dd 0            ; event key staged for the current tick

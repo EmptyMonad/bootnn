@@ -40,6 +40,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from boot_test import QMP, find_qemu            # noqa: E402
+from dnos_client import frame                   # noqa: E402
 from interactive_test import DEMO_KEYS          # noqa: E402
 from swarm_test import (fb_digest, read_sym,    # noqa: E402
                         send_key, state_vector)
@@ -117,7 +118,7 @@ def main():
         for key in args.keys:
             expected = int(np.argmax(machine.step(ord(key))[:20]))
             send_key(qk, key)                 # node K: PS/2
-            wire.sendall(key.encode("ascii"))  # node S: the wire
+            wire.sendall(frame(ord(key)))     # node S: v1-framed wire
             time.sleep(args.settle_seconds)
             states = checkpoint(f"after_{key}")
             actual = dict(states)["last_cmd"]
@@ -125,6 +126,21 @@ def main():
                 act = (CMD_NAMES[actual]
                        if actual < len(CMD_NAMES) else f"cmd{actual}")
                 failures.append(f"'{key}': law={CMD_NAMES[expected]} metal={act}")
+
+        # ── v1 framing negative: unframed bytes must be discarded ────────
+        # A bare (headerless) byte is not an event; the kernel counts it
+        # in serial_bad_frames and no node state may change.
+        pre = state_vector(qs, sym)
+        wire.sendall(b"z")                    # desync attempt
+        time.sleep(args.settle_seconds)
+        post = state_vector(qs, sym)
+        bad = read_sym(qs, sym["serial_bad_frames"], 4)
+        print(f"[serial] unframed byte: bad_frames={bad} (want >=1), "
+              f"state {'unchanged' if pre == post else 'CHANGED'}")
+        if bad < 1:
+            failures.append("unframed byte was not counted as bad")
+        if pre != post:
+            failures.append("unframed byte changed node state")
 
         # ── provenance: same state, different producers ──────────────────
         rx_k = read_sym(qk, sym["serial_rx_count"], 4)

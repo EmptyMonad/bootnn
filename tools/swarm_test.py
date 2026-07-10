@@ -74,9 +74,26 @@ def read_sym(qmp, addr, width):
     return int(r["return"].strip().split(":")[1].strip(), 16)
 
 
+def h_digest(qmp, sym):
+    """CRC32 of the recurrent state h (SSM_H=512 int16 at h_state).
+    This is the working memory itself; folding it in means swarm
+    replication now covers the network's state, not just its outputs.
+    One bulk xp dump, then hash the little-endian bytes."""
+    r = qmp.execute("human-monitor-command",
+                    **{"command-line": f"xp /512hx {sym['h_state']:#x}"})
+    words = []
+    for line in r["return"].strip().splitlines():
+        # "<addr>: 0xhhhh 0xhhhh ..."
+        for tok in line.split(":", 1)[1].split():
+            words.append(int(tok, 16) & 0xFFFF)
+    raw = b"".join(w.to_bytes(2, "little") for w in words)
+    return zlib.crc32(raw) & 0xFFFFFFFF
+
+
 def state_vector(qmp, sym):
     return tuple((name, read_sym(qmp, sym[name], width))
-                 for name, width in STATE_VECTOR)
+                 for name, width in STATE_VECTOR) \
+        + (("h_crc", h_digest(qmp, sym)),)
 
 
 def read_counters(qmp, sym):
