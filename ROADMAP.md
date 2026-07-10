@@ -179,9 +179,12 @@ conversation. Order is deliberate.
    (`tools/ssm_lab.py`, 10k epochs): canonical 387/387, held-out
    99.9% (equal to Q8.8), words 100% in honest typing order —
    recency-as-architecture lets ternary match full precision.
-   Graduation steps: (a) format v5 (decay table + ternary blocks) +
-   stateful `simulate_assembly_forward` in train.py, word data in
-   typing order; (b) kernel recurrent tick — shift-subtract decay,
+   Graduation steps: (a) ✅ format v5 + `SsmMachine` in train.py
+   (commit 44f711b); **canonical v5 blob pinned: CRC 0xD4BFDECC**
+   (`ssm_lab.py --epochs 10000 --save`, seed 1337 — reproduced its
+   gate numbers exactly on rerun; spot-checked live: 'box' typed
+   forward decodes rect, junk-prefixed single keys hold). Next:
+   (b) kernel recurrent tick — shift-subtract decay,
    packed-walk drive + readout, no `imul`, h at `h_base` in the
    canonical state vector and swarm digest; (c) demo assertions
    regenerated from the simulator; (d) every gate extended
