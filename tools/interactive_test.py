@@ -32,11 +32,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from boot_test import QMP, find_qemu  # noqa: E402
-from train import (CMD_NAMES, sequence_to_input,  # noqa: E402
-                   simulate_assembly_forward)
+from train import CMD_NAMES, SsmMachine  # noqa: E402
 
 IMAGE = ROOT / "dnos.img"
-WEIGHTS = ROOT / "weights.bin"
+WEIGHTS = ROOT / "weights_ssm.bin"
 SYMBOLS = ROOT / "dnos_symbols.json"
 SHOTS = ROOT / "interactive_shots"
 
@@ -98,14 +97,14 @@ def main():
         print(f"[interactive] waiting {args.boot_seconds}s for boot demo...")
         time.sleep(args.boot_seconds)
 
-        # History after the demo, most recent first.
-        history = [ord(c) for c in DEMO_KEYS[::-1]]
+        # The law is now stateful (v5 recurrent): mirror the metal by
+        # stepping SsmMachine through the same boot demo, then key by key.
+        machine = SsmMachine(str(WEIGHTS))
+        machine.run([ord(c) for c in DEMO_KEYS])
         prev_shot = screendump(qmp, "baseline")
 
         for key in args.keys:
-            keys_now = [ord(key)] + history
-            out = simulate_assembly_forward(
-                WEIGHTS, sequence_to_input(keys_now))
+            out = machine.step(ord(key))
             expected = int(np.argmax(out[:20]))
 
             qmp.execute("send-key",
@@ -128,8 +127,6 @@ def main():
                 mismatches.append(key)
             if exp_name in DRAW_CMDS:
                 draw_diffs.append(changed)
-
-            history = [ord(key)] + history
 
         try:
             qmp.execute("quit", expect_reply=False)

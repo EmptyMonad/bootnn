@@ -38,10 +38,14 @@ ROOT     = Path(__file__).resolve().parent.parent
 ASM_SRC  = ROOT / "src" / "dnos.asm"
 TRAIN    = ROOT / "tools" / "train.py"
 IMAGE    = ROOT / "dnos.img"
-WEIGHTS  = ROOT / "weights.bin"
+WEIGHTS  = ROOT / "weights_ssm.bin"   # v5 recurrent-ternary blob (Tier 4 Part B)
+SSM_LAB  = ROOT / "tools" / "ssm_lab.py"
 LISTING  = ROOT / "dnos.lst"
 SYMBOLS  = ROOT / "dnos_symbols.json"
 ORG_BASE = 0x7C00             # whole image is org 0x7C00; phys = org + file offset
+STATE_H_ADDR = 0x60000        # ACTIV_BASE + A_STATE; the recurrent state h
+                              # (SSM_H int16). Fixed absolute region, not a
+                              # label, so it is injected into the symbol map.
 
 # Kernel variables exported to dnos_symbols.json for the boot/interactive
 # tests to inspect via the QEMU monitor.
@@ -101,14 +105,16 @@ def export_symbols():
         m = pattern.match(line)
         if m and m.group(2) in SYMBOL_NAMES:
             symbols[m.group(2)] = ORG_BASE + int(m.group(1), 16)
+    symbols["h_state"] = STATE_H_ADDR      # fixed region, injected (see above)
     SYMBOLS.write_text(json.dumps(symbols, indent=2) + "\n")
     print(f"[DNOS] Exported {len(symbols)} symbols -> {SYMBOLS.name}")
 
 
 def ensure_weights(python, force):
     if force or not WEIGHTS.exists():
-        print("[DNOS] Training weights...")
-        run([python, str(TRAIN), "--output", str(WEIGHTS)])
+        print("[DNOS] Training v5 recurrent-ternary weights (ssm_lab)...")
+        run([python, str(SSM_LAB), "--epochs", "10000",
+             "--save", str(WEIGHTS)])
     else:
         print(f"[DNOS] Using existing {WEIGHTS.name}")
 

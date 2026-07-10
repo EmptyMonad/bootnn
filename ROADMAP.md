@@ -184,12 +184,19 @@ conversation. Order is deliberate.
    (`ssm_lab.py --epochs 10000 --save`, seed 1337 — reproduced its
    gate numbers exactly on rerun; spot-checked live: 'box' typed
    forward decodes rect, junk-prefixed single keys hold). Next:
-   (b) kernel recurrent tick — shift-subtract decay,
-   packed-walk drive + readout, no `imul`, h at `h_base` in the
-   canonical state vector and swarm digest; (c) demo assertions
-   regenerated from the simulator; (d) every gate extended
-   (integrity over table+blocks, stateful differential, swarm digest
-   with h), tick budget re-measured, PIT re-pinned.
+   (b) ✅ **kernel recurrent tick landed** — `neural_forward_32` is
+   the v5 law: shift-subtract decay over 512 int16 channels at
+   ACTIV_BASE (zeroed at boot), `ternary_dot` walks packed 2-bit
+   weights (add/sub/skip — **`imul` gone from inference**), drive +
+   3-layer ternary readout; the 64-event window and its shift are
+   deleted. `validate_weights` rewritten for v5 (version, five sizes,
+   CRC over the whole payload, header shifts). Verified live:
+   interactive law==metal 6/6 vs `SsmMachine`, boot, tick, integrity
+   (payload CRC, corruption rejected), swarm 3-node, serial, client,
+   format gate — all green. (c) demo: satisfied (the kernel demo
+   seeds `SsmMachine` in the differential tests). Remaining (d): fold
+   `h` into the swarm digest (`h_state` exported at 0x60000; digest
+   is still state-vector-only) and re-measure the per-tick budget.
 3. 📋 **S1 v1 — versioned IAL token framing** (unblocked by item 2):
    frame = version byte + the Tier 4 event features; kernel framer on
    COM1; `dnos_client.py` and the Rust IAL emit it; serial_test

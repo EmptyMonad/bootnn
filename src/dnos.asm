@@ -46,7 +46,7 @@ KERNEL_SECTORS  equ 48          ; sectors to load (code+font+CRC table; ceiling 
 KERNEL_ADDR     equ 0x8600      ; MUST equal linked pm_entry (org 0x7C00 + 0xA00)
 KERNEL_LBA      equ 5           ; LBA where the kernel image begins
 WEIGHTS_LBA     equ 69          ; LBA where the weight blob begins
-WEIGHT_SECTORS  equ 3681        ; 128 B header + 1,884,160 B weights, sector-aligned
+WEIGHT_SECTORS  equ 464         ; v5: 128 B header + 237,056 B payload, sector-aligned
 CHUNK_SECTORS   equ 64          ; 32 KB per INT 13h read into the bounce buffer
 
 boot_entry:
@@ -582,26 +582,34 @@ HISTORY_BASE    equ 0x30000     ; Input history buffer (above weight region)
 KEYBUF_BASE     equ 0x70000     ; Keyboard ring buffer
 
 ; Network topology
-NET_INPUT       equ 512         ; 64 events × 8 features
-NET_HIDDEN1     equ 1024
-NET_HIDDEN2     equ 384
-NET_OUTPUT      equ 64
-NET_HISTORY     equ 64          ; Context events
-NET_TOTAL_W     equ (NET_INPUT*NET_HIDDEN1)+(NET_HIDDEN1*NET_HIDDEN2)+(NET_HIDDEN2*NET_OUTPUT)  ; 942,080
-NET_FEATURES    equ 8           ; Features per event
+; Tier 4 Part B (v5): recurrent ternary. The tick IS the recurrence:
+;   hl[c] = h[c] - (h[c] >> d[c])          ; decay, shift-subtract
+;   h[c]  = clamp(hl[c] + (drive(x) >> k_in))
+;   y     = ternary MLP readout on h        ; add/sub/skip, no imul
+SSM_IN          equ 8           ; event features (one key byte)
+SSM_H           equ 512         ; recurrent state channels (working memory)
+SSM_R1          equ 1024
+SSM_R2          equ 384
+SSM_OUT         equ 64
+NET_FEATURES    equ 8
+SSM_TOTAL_W     equ (SSM_IN*SSM_H)+(SSM_H*SSM_R1)+(SSM_R1*SSM_R2)+(SSM_R2*SSM_OUT)  ; 946,176
 
-; Weight offsets (in bytes, int16 = 2 bytes each)
-; Header is 128 bytes
+; v5 payload offsets from WEIGHT_BASE. Header 128 B, then the decay
+; byte table (SSM_H bytes), then packed 2-bit ternary blocks (n/4 B).
 W_HEADER        equ 128
-W1_OFF          equ W_HEADER                            ; 512×1024 = 524288 weights
-W2_OFF          equ W1_OFF + (NET_INPUT * NET_HIDDEN1 * 2)     ; 1024×384 = 393216
-W3_OFF          equ W2_OFF + (NET_HIDDEN1 * NET_HIDDEN2 * 2)   ; 384×64 = 24576
+DECAY_OFF       equ W_HEADER
+WIN_OFF         equ DECAY_OFF + SSM_H                        ; 8×512 packed = 1024 B
+SW1_OFF         equ WIN_OFF + (SSM_IN * SSM_H / 4)           ; 512×1024 packed
+SW2_OFF         equ SW1_OFF + (SSM_H * SSM_R1 / 4)           ; 1024×384 packed
+SW3_OFF         equ SW2_OFF + (SSM_R1 * SSM_R2 / 4)          ; 384×64 packed
+PAYLOAD_BYTES   equ SSM_H + (SSM_TOTAL_W / 4)                ; decay table + weights
 
-; Activation offsets in ACTIV_BASE
-A_INPUT         equ 0
-A_HIDDEN1       equ A_INPUT + (NET_INPUT * 2)
-A_HIDDEN2       equ A_HIDDEN1 + (NET_HIDDEN1 * 2)
-A_OUTPUT        equ A_HIDDEN2 + (NET_HIDDEN2 * 2)
+; Activation layout in ACTIV_BASE. H is PERSISTENT (the state); the
+; rest is per-tick scratch.
+A_STATE         equ 0                                        ; h: SSM_H int16 (persists)
+A_R1            equ A_STATE + (SSM_H * 2)
+A_R2            equ A_R1 + (SSM_R1 * 2)
+A_OUTPUT        equ A_R2 + (SSM_R2 * 2)
 
 ; Commands
 CMD_NOP         equ 0
@@ -664,8 +672,16 @@ pm_entry:
     mov [cursor_y], eax
 
     ; Validate the weight blob before trusting it as law:
-    ; magic, layer sizes, weight count, CRC32 over all 86,016 bytes.
+    ; magic, version 5, five layer sizes, weight count, CRC32 over the
+    ; whole payload (decay table + packed ternary weights).
     call validate_weights
+
+    ; Zero the recurrent state h (SSM_H int16 at ACTIV_BASE). Birth:
+    ; every node boots with h = 0, so replicas share state from tick 0.
+    mov edi, ACTIV_BASE + A_STATE
+    mov ecx, SSM_H
+    xor eax, eax
+    rep stosw
 
     ; Set up IDT
     call setup_idt
@@ -1104,186 +1120,189 @@ main_loop:
 ; EAX = ASCII key → shift history, encode as 8-bit binary
 ;===============================================================================
 
+; Stash the event key for the tick. (Kept as a separate call so demo/
+; main-loop call sites are unchanged; the window shift is gone — memory
+; is now the recurrent state h, not a replayed buffer.)
 encode_input_32:
-    pushad
-
-    ; Shift history: move events [0..N-2] → [1..N-1]
-    ; Each event = NET_FEATURES * 2 bytes = 16 bytes
-    mov esi, HISTORY_BASE + (NET_HISTORY - 2) * NET_FEATURES * 2
-    mov edi, HISTORY_BASE + (NET_HISTORY - 1) * NET_FEATURES * 2
-    mov ecx, (NET_HISTORY - 1) * NET_FEATURES
-    std
-    rep movsw
-    cld
-
-    ; Encode current key at slot 0
-    mov edi, HISTORY_BASE
-    mov ecx, 8
-
-    ; Feature 0-7: 8-bit binary encoding of ASCII value
-.enc_bit:
-    shr eax, 1
-    jnc .enc_zero
-    mov word [edi], 0x0100   ; Q8.8: 1.0 (must match train.py INPUT_ACTIVE_LEVEL)
-    jmp .enc_next
-.enc_zero:
-    mov word [edi], 0x0000   ; Q8.8: 0.0
-.enc_next:
-    add edi, 2
-    loop .enc_bit
-
-    popad
+    mov [cur_key], eax
     ret
 
 ;===============================================================================
-; NEURAL FORWARD PASS (32-bit, 3 weight layers)
-; Q8.8 fixed-point: multiply two Q8.8, result >> 8
-; Accumulate in 32-bit to avoid overflow
+; ternary_dot — one neuron's dot product over packed 2-bit weights.
+;   in:  ESI = activation base (int16), EDX = packed weight addr,
+;        ECX = input count (multiple of 4)
+;   out: EBX = signed 32-bit sum (add/sub/skip; NO imul)
+;   Codes: 00 skip, 01 +act, 11 -act (10 reserved, rejected at boot).
+;===============================================================================
+ternary_dot:
+    push ecx
+    push esi
+    push edx
+    push ebp
+    xor ebx, ebx
+    shr ecx, 2                       ; packed byte count
+.td_byte:
+    movzx eax, byte [edx]            ; 4 codes
+    inc edx
+    mov ebp, 4
+.td_code:
+    test eax, 1
+    jz .td_next                      ; code 00 → skip (bit0 clear)
+    movsx edi, word [esi]
+    test eax, 2
+    jz .td_add                       ; 01 → +act
+    sub ebx, edi                     ; 11 → -act
+    jmp .td_next
+.td_add:
+    add ebx, edi
+.td_next:
+    add esi, 2
+    shr eax, 2
+    dec ebp
+    jnz .td_code
+    dec ecx
+    jnz .td_byte
+    pop ebp
+    pop edx
+    pop esi
+    pop ecx
+    ret
+
+;===============================================================================
+; NEURAL FORWARD PASS (v5): one recurrent tick + ternary MLP readout.
+; S(n+1) = f(S(n), input(n)) — literally: h is carried across ticks.
 ;===============================================================================
 
 neural_forward_32:
     pushad
 
-    ; Copy input history → activation input buffer
-    mov esi, HISTORY_BASE
-    mov edi, ACTIV_BASE + A_INPUT
-    mov ecx, NET_INPUT
-    rep movsw
+    ; --- Build the 8 event features x[i] = ((key>>i)&1) * 256 (Q8.8) ---
+    mov eax, [cur_key]
+    mov edi, xfeat
+    mov ecx, SSM_IN
+.nf_feat:
+    xor edx, edx
+    shr eax, 1
+    jnc .nf_feat0
+    mov edx, 0x0100                  ; 1.0 in Q8.8
+.nf_feat0:
+    mov [edi], dx
+    add edi, 2
+    loop .nf_feat
 
-    ;--- Layer 1: Input(256) → Hidden1(128) ---
-    mov ebp, 0               ; Neuron index j
+    ; --- Recurrent state update: for each channel c ---
+    mov ebp, 0
+.state_ch:
+    ; drive = ternary_dot(xfeat, WIN_OFF + c*(SSM_IN/4), SSM_IN) >> k_in
+    mov esi, xfeat
+    mov edx, ebp
+    imul edx, SSM_IN / 4             ; scale is compile-time const; index math only
+    add edx, WEIGHT_BASE + WIN_OFF
+    mov ecx, SSM_IN
+    call ternary_dot                 ; EBX = drive (pre-shift)
+    mov cl, [sh_in]
+    sar ebx, cl                      ; >> k_in
 
-.L1_neuron:
-    xor ebx, ebx             ; 32-bit accumulator
+    ; hl = h[c] - (h[c] >> d[c])
+    movsx eax, word [ACTIV_BASE + A_STATE + ebp*2]
+    mov edx, eax
+    mov cl, [WEIGHT_BASE + DECAY_OFF + ebp]
+    sar edx, cl
+    sub eax, edx                     ; EAX = hl
+    add eax, ebx                     ; + drive
 
-    ; Weight offset: W_HEADER + j * NET_INPUT * 2 + i * 2
-    mov eax, ebp
-    imul eax, NET_INPUT * 2
-    add eax, W1_OFF
-    mov edx, eax             ; EDX = weight pointer offset
-
-    mov esi, ACTIV_BASE + A_INPUT
-    mov ecx, NET_INPUT
-
-.L1_sum:
-    movsx eax, word [esi]            ; Input activation (Q8.8)
-    movsx edi, word [WEIGHT_BASE + edx]  ; Weight (Q8.8)
-    imul eax, edi                    ; EAX = a * w (Q16.16); two-operand form —
-                                     ; one-operand imul clobbers EDX (weight ptr)
-    sar eax, 8                       ; → Q8.8
-    add ebx, eax                     ; Accumulate
-    add esi, 2
-    add edx, 2
-    loop .L1_sum
-
-    ; ReLU activation
-    test ebx, ebx
-    jns .L1_pos
-    xor ebx, ebx
-.L1_pos:
-    ; Clamp to int16 range
-    cmp ebx, 32767
-    jle .L1_clamp_ok
-    mov ebx, 32767
-.L1_clamp_ok:
-
-    ; Store
-    mov eax, ebp
-    shl eax, 1
-    mov [ACTIV_BASE + A_HIDDEN1 + eax], bx
+    ; clamp to int16
+    cmp eax, 32767
+    jle .st_hi_ok
+    mov eax, 32767
+.st_hi_ok:
+    cmp eax, -32768
+    jge .st_lo_ok
+    mov eax, -32768
+.st_lo_ok:
+    mov [ACTIV_BASE + A_STATE + ebp*2], ax
 
     inc ebp
-    cmp ebp, NET_HIDDEN1
-    jb .L1_neuron
+    cmp ebp, SSM_H
+    jb .state_ch
 
-    ;--- Layer 2: Hidden1(128) → Hidden2(64) ---
+    ; --- Readout layer 1: h(512) → R1(1024), ReLU+clamp, >> k1 ---
     mov ebp, 0
-
-.L2_neuron:
-    xor ebx, ebx
-
-    mov eax, ebp
-    imul eax, NET_HIDDEN1 * 2
-    add eax, W2_OFF
-    mov edx, eax
-
-    mov esi, ACTIV_BASE + A_HIDDEN1
-    mov ecx, NET_HIDDEN1
-
-.L2_sum:
-    movsx eax, word [esi]
-    movsx edi, word [WEIGHT_BASE + edx]
-    imul eax, edi                    ; two-operand: must not clobber EDX
-    sar eax, 8
-    add ebx, eax
-    add esi, 2
-    add edx, 2
-    loop .L2_sum
-
-    ; ReLU
+.R1_neuron:
+    mov esi, ACTIV_BASE + A_STATE
+    mov edx, ebp
+    imul edx, SSM_H / 4
+    add edx, WEIGHT_BASE + SW1_OFF
+    mov ecx, SSM_H
+    call ternary_dot
+    mov cl, [sh1]
+    sar ebx, cl
     test ebx, ebx
-    jns .L2_pos
+    jns .R1_pos
     xor ebx, ebx
-.L2_pos:
+.R1_pos:
     cmp ebx, 32767
-    jle .L2_clamp_ok
+    jle .R1_ok
     mov ebx, 32767
-.L2_clamp_ok:
-
-    mov eax, ebp
-    shl eax, 1
-    mov [ACTIV_BASE + A_HIDDEN2 + eax], bx
-
+.R1_ok:
+    mov [ACTIV_BASE + A_R1 + ebp*2], bx
     inc ebp
-    cmp ebp, NET_HIDDEN2
-    jb .L2_neuron
+    cmp ebp, SSM_R1
+    jb .R1_neuron
 
-    ;--- Layer 3: Hidden2(64) → Output(32) ---
+    ; --- Readout layer 2: R1(1024) → R2(384), ReLU+clamp, >> k2 ---
     mov ebp, 0
-
-.L3_neuron:
+.R2_neuron:
+    mov esi, ACTIV_BASE + A_R1
+    mov edx, ebp
+    imul edx, SSM_R1 / 4
+    add edx, WEIGHT_BASE + SW2_OFF
+    mov ecx, SSM_R1
+    call ternary_dot
+    mov cl, [sh2]
+    sar ebx, cl
+    test ebx, ebx
+    jns .R2_pos
     xor ebx, ebx
+.R2_pos:
+    cmp ebx, 32767
+    jle .R2_ok
+    mov ebx, 32767
+.R2_ok:
+    mov [ACTIV_BASE + A_R2 + ebp*2], bx
+    inc ebp
+    cmp ebp, SSM_R2
+    jb .R2_neuron
 
-    mov eax, ebp
-    imul eax, NET_HIDDEN2 * 2
-    add eax, W3_OFF
-    mov edx, eax
-
-    mov esi, ACTIV_BASE + A_HIDDEN2
-    mov ecx, NET_HIDDEN2
-
-.L3_sum:
-    movsx eax, word [esi]
-    movsx edi, word [WEIGHT_BASE + edx]
-    imul eax, edi                    ; two-operand: must not clobber EDX
-    sar eax, 8
-    add ebx, eax
-    add esi, 2
-    add edx, 2
-    loop .L3_sum
-
-    ; Output layer: piecewise sigmoid (not ReLU)
-    ; Maps roughly to [0, 32767]
+    ; --- Readout layer 3: R2(384) → OUT(64), piecewise sigmoid, >> k3 ---
+    mov ebp, 0
+.R3_neuron:
+    mov esi, ACTIV_BASE + A_R2
+    mov edx, ebp
+    imul edx, SSM_R2 / 4
+    add edx, WEIGHT_BASE + SW3_OFF
+    mov ecx, SSM_R2
+    call ternary_dot
+    mov cl, [sh3]
+    sar ebx, cl
+    ; piecewise sigmoid: clamp/scale to [0,32767]
     cmp ebx, -8192
-    jl .L3_sat_lo
+    jl .R3_lo
     cmp ebx, 8192
-    jg .L3_sat_hi
+    jg .R3_hi
     add ebx, 8192
     shl ebx, 1
-    jmp .L3_store
-.L3_sat_lo:
+    jmp .R3_store
+.R3_lo:
     xor ebx, ebx
-    jmp .L3_store
-.L3_sat_hi:
+    jmp .R3_store
+.R3_hi:
     mov ebx, 32767
-.L3_store:
-    mov eax, ebp
-    shl eax, 1
-    mov [ACTIV_BASE + A_OUTPUT + eax], bx
-
+.R3_store:
+    mov [ACTIV_BASE + A_OUTPUT + ebp*2], bx
     inc ebp
-    cmp ebp, NET_OUTPUT
-    jb .L3_neuron
+    cmp ebp, SSM_OUT
+    jb .R3_neuron
 
     popad
     ret
@@ -2024,21 +2043,35 @@ validate_weights:
     pushad
     cmp word [WEIGHT_BASE], 0x4E44           ; 'D','N' little-endian
     jne .vw_bad
-    cmp word [WEIGHT_BASE + 5], NET_INPUT
+    cmp byte [WEIGHT_BASE + 2], 5            ; format version 5 (recurrent)
     jne .vw_bad
-    cmp word [WEIGHT_BASE + 7], NET_HIDDEN1
+    cmp word [WEIGHT_BASE + 5], SSM_IN       ; five layer sizes
     jne .vw_bad
-    cmp word [WEIGHT_BASE + 9], NET_HIDDEN2
+    cmp word [WEIGHT_BASE + 7], SSM_H
     jne .vw_bad
-    cmp word [WEIGHT_BASE + 11], NET_OUTPUT
+    cmp word [WEIGHT_BASE + 9], SSM_R1
     jne .vw_bad
-    cmp dword [WEIGHT_BASE + 16], NET_TOTAL_W
+    cmp word [WEIGHT_BASE + 11], SSM_R2
     jne .vw_bad
+    cmp word [WEIGHT_BASE + 13], SSM_OUT
+    jne .vw_bad
+    cmp dword [WEIGHT_BASE + 16], SSM_TOTAL_W
+    jne .vw_bad
+    ; CRC32 over the whole payload (decay table + packed ternary weights)
     mov esi, WEIGHT_BASE + W_HEADER
-    mov ecx, NET_TOTAL_W * 2
+    mov ecx, PAYLOAD_BYTES
     call crc32_region
     cmp eax, [WEIGHT_BASE + 21]
     jne .vw_bad
+    ; Load the four per-layer shift counts from the header.
+    mov al, [WEIGHT_BASE + 25]
+    mov [sh_in], al
+    mov al, [WEIGHT_BASE + 26]
+    mov [sh1], al
+    mov al, [WEIGHT_BASE + 27]
+    mov [sh2], al
+    mov al, [WEIGHT_BASE + 28]
+    mov [sh3], al
     mov dword [hdr_status], 1
     popad
     ret
@@ -2095,6 +2128,17 @@ kb_write_idx:   dw 0
 
 serial_present: db 0            ; UART probe result (0 = never poll)
 serial_rx_count: dd 0           ; COM1 bytes accepted into the event ring
+
+; v5 recurrent law state
+cur_key:        dd 0            ; event key staged for the current tick
+sh_in:          db 0            ; per-layer shift counts (loaded from header)
+sh1:            db 0
+sh2:            db 0
+sh3:            db 0
+align 2
+xfeat:          times SSM_IN dw 0   ; 8 event features, Q8.8 (0 or 256)
+h_base:         dd ACTIV_BASE       ; exported: the recurrent state h lives at
+                                    ; ACTIV_BASE+A_STATE (SSM_H int16), persistent
 
 last_tick:      dd 0            ; tick consumed by the last main-loop step
 step_count:     dd 0            ; state transitions performed (<= tick_count)

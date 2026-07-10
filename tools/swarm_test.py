@@ -42,11 +42,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from boot_test import QMP, find_qemu            # noqa: E402
 from interactive_test import DEMO_KEYS          # noqa: E402
-from train import (CMD_NAMES, sequence_to_input,  # noqa: E402
-                   simulate_assembly_forward)
+from train import CMD_NAMES, SsmMachine         # noqa: E402
 
 IMAGE = ROOT / "dnos.img"
-WEIGHTS = ROOT / "weights.bin"
+WEIGHTS = ROOT / "weights_ssm.bin"
 SYMBOLS = ROOT / "dnos_symbols.json"
 SHOTS = ROOT / "swarm_shots"
 
@@ -161,10 +160,10 @@ def main():
                 failures.append("expected 800x600x32 under QEMU stdvga")
 
         # ── gate 2: shared log, per-key law==metal==metal==... ──────────
-        history = [ord(c) for c in DEMO_KEYS[::-1]]
+        machine = SsmMachine(str(WEIGHTS))
+        machine.run([ord(c) for c in DEMO_KEYS])
         for key in args.keys:
-            expected = int(np.argmax(simulate_assembly_forward(
-                WEIGHTS, sequence_to_input([ord(key)] + history))[:20]))
+            expected = int(np.argmax(machine.step(ord(key))[:20]))
             for q in qmps:
                 send_key(q, key)
             time.sleep(args.settle_seconds)
@@ -177,7 +176,6 @@ def main():
                                 f"metal={act_name}")
                 print(f"[swarm]   law MISMATCH: expected "
                       f"{CMD_NAMES[expected]}, got {act_name}")
-            history = [ord(key)] + history
 
         # ── gate 3: negative test — fork node 0, must be localized ──────
         send_key(qmps[0], "p")

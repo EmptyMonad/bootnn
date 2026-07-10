@@ -43,11 +43,10 @@ from boot_test import QMP, find_qemu            # noqa: E402
 from interactive_test import DEMO_KEYS          # noqa: E402
 from swarm_test import (fb_digest, read_sym,    # noqa: E402
                         send_key, state_vector)
-from train import (CMD_NAMES, sequence_to_input,  # noqa: E402
-                   simulate_assembly_forward)
+from train import CMD_NAMES, SsmMachine         # noqa: E402
 
 IMAGE = ROOT / "dnos.img"
-WEIGHTS = ROOT / "weights.bin"
+WEIGHTS = ROOT / "weights_ssm.bin"
 SYMBOLS = ROOT / "dnos_symbols.json"
 
 QMP_K, QMP_S, SERIAL_PORT = 55640, 55641, 55642
@@ -113,10 +112,10 @@ def main():
 
         checkpoint("post-demo")
 
-        history = [ord(c) for c in DEMO_KEYS[::-1]]
+        machine = SsmMachine(str(WEIGHTS))
+        machine.run([ord(c) for c in DEMO_KEYS])
         for key in args.keys:
-            expected = int(np.argmax(simulate_assembly_forward(
-                WEIGHTS, sequence_to_input([ord(key)] + history))[:20]))
+            expected = int(np.argmax(machine.step(ord(key))[:20]))
             send_key(qk, key)                 # node K: PS/2
             wire.sendall(key.encode("ascii"))  # node S: the wire
             time.sleep(args.settle_seconds)
@@ -126,7 +125,6 @@ def main():
                 act = (CMD_NAMES[actual]
                        if actual < len(CMD_NAMES) else f"cmd{actual}")
                 failures.append(f"'{key}': law={CMD_NAMES[expected]} metal={act}")
-            history = [ord(key)] + history
 
         # ── provenance: same state, different producers ──────────────────
         rx_k = read_sym(qk, sym["serial_rx_count"], 4)

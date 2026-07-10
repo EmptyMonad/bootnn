@@ -41,11 +41,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 from boot_test import QMP, find_qemu            # noqa: E402
 from interactive_test import DEMO_KEYS          # noqa: E402
 from swarm_test import fb_digest, state_vector  # noqa: E402
-from train import (CMD_NAMES, sequence_to_input,  # noqa: E402
-                   simulate_assembly_forward)
+from train import CMD_NAMES, SsmMachine         # noqa: E402
 
 IMAGE = ROOT / "dnos.img"
-WEIGHTS = ROOT / "weights.bin"
+WEIGHTS = ROOT / "weights_ssm.bin"
 SYMBOLS = ROOT / "dnos_symbols.json"
 SESSIONS = ROOT / "sessions"
 
@@ -138,14 +137,14 @@ def main():
         log_f = log_path.open("w")
 
     node = Node(find_qemu(args.qemu), args.boot_seconds)
-    history = [ord(c) for c in DEMO_KEYS[::-1]]
+    machine = SsmMachine(str(WEIGHTS))         # mirrors the metal, tick by tick
+    machine.run([ord(c) for c in DEMO_KEYS])   # boot demo sets initial h
     mismatches = 0
     sent = 0
 
     def step(byte):
-        nonlocal history, mismatches, sent
-        expected = int(np.argmax(simulate_assembly_forward(
-            WEIGHTS, sequence_to_input([byte] + history))[:20]))
+        nonlocal mismatches, sent
+        expected = int(np.argmax(machine.step(byte)[:20]))
         node.wire.sendall(bytes([byte]))
         sent += 1
         if log_f:
