@@ -37,7 +37,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from train import CMD, CMD_NAMES, ternary_project  # noqa: E402
+from train import CMD, CMD_NAMES, save_v5, ternary_project  # noqa: E402
 
 FEAT = 8
 SEQ_LEN = 64
@@ -156,6 +156,13 @@ class SsmLab:
                        np.where(z3 > 8192, 32767, (z3 + 8192) * 2))
         return 100 * np.mean(np.argmax(out[:, :N_CMD], axis=1) == cls)
 
+    def save(self, filename):
+        """Emit the projected law as a format v5 blob (train.save_v5)."""
+        projs = [self._proj(w, i) for i, w in
+                 enumerate((self.win, self.w1, self.w2, self.w3))]
+        return save_v5(filename, self.d, [p[0] for p in projs],
+                       tuple(int(p[1]) for p in projs))
+
     # ── float shadow (BPTT) ─────────────────────────────────────────────
     def _ste(self, w, i):
         s, k = self._proj(w, i)
@@ -249,6 +256,7 @@ def main():
     ap.add_argument('--lr', type=float, default=0.02)
     ap.add_argument('--h', type=int, default=512)
     ap.add_argument('--seed', type=int, default=1337)
+    ap.add_argument('--save', help='write the trained law as a v5 blob')
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -288,6 +296,8 @@ def main():
     Xw, cw = encode(words)
     print(f"[ssm_lab] word commands (typing order): "
           f"{lab.int_accuracy(Xw, cw):.1f}% of {len(words)}")
+    if args.save:
+        lab.save(args.save)
     ok = acc_c == 100.0 and acc_e >= 95.0
     print(f"[ssm_lab] result: {'GATES MET' if ok else 'below gates'}")
     sys.exit(0 if ok else 1)

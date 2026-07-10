@@ -3,6 +3,7 @@ dnos.img
 weights.bin
 weights_test*.bin
 weights_ternary.bin
+weights_ssm.bin
 qemu_debug.log
 qemu_int.log
 kbd_trace.log

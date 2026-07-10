@@ -25,8 +25,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from train import (HEADER_SIZE, Tier2Network,  # noqa: E402
+from train import (HEADER_SIZE, SsmMachine, Tier2Network,  # noqa: E402
                    generate_training_data, simulate_assembly_forward)
+from ssm_lab import SsmLab, encode, gen_sequences  # noqa: E402
 
 N_EXAMPLES = 30
 
@@ -64,6 +65,25 @@ def main():
               f"({N_EXAMPLES} examples, file vs memory)")
         if not ok:
             failures.append(f"{name}: packed file diverges from the law")
+
+    # ── v5 (recurrent ternary): the stateful machine vs the lab's law ──
+    np.random.seed(1234)
+    lab = SsmLab(h=512)
+    lab.save(str(tmp / "v5.bin"))
+    machine = SsmMachine(str(tmp / "v5.bin"))
+    seqs = gen_sequences()[:15]
+    Xs, _ = encode(seqs)
+    z3 = lab.int_logits(Xs)
+    mem = np.where(z3 < -8192, 0,
+                   np.where(z3 > 8192, 32767, (z3 + 8192) * 2))
+    ok = all(np.array_equal(
+        np.asarray(machine.run(keys), dtype=np.int64),
+        mem[i].astype(np.int64)) for i, (keys, _, _) in enumerate(seqs))
+    print(f"[ternary_format] v5 recurrent (512ch): "
+          f"{'BIT-EXACT' if ok else 'DIVERGED'} "
+          f"({len(seqs)} sequences, SsmMachine vs lab law)")
+    if not ok:
+        failures.append("v5: SsmMachine diverges from the lab law")
 
     # Reserved code 10: inject into the first weight byte and expect
     # refusal before inference.

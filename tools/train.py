@@ -269,6 +269,32 @@ def sigmoid_piecewise_deriv(x):
     mask = (x > -32.0) & (x < 32.0)
     return mask.astype(np.float32) / 64.0
 
+def pack_ternary(s):
+    """Pack a ternary sign matrix (in, out) into 2-bit codes, row-per-
+    neuron order (transpose, C-order), weight i in bits 2·(i mod 4).
+    Codes: 00=0, 01=+1, 11=-1; 10 is reserved and never written."""
+    flat = np.asarray(s).T.astype(np.int8).ravel()
+    codes = np.where(flat == 0, 0,
+                     np.where(flat > 0, 1, 3)).astype(np.uint8)
+    assert not np.any(codes == 2), "reserved ternary code 10"
+    q = codes.reshape(-1, 4)
+    return (q[:, 0] | (q[:, 1] << 2) | (q[:, 2] << 4)
+            | (q[:, 3] << 6)).astype(np.uint8).tobytes()
+
+
+def unpack_ternary(raw, n_weights):
+    """Inverse of pack_ternary -> int64 signs; refuses reserved code 10."""
+    packed = np.frombuffer(raw, dtype=np.uint8)
+    codes = np.empty(n_weights, dtype=np.uint8)
+    for j in range(4):
+        codes[j::4] = (packed >> (2 * j)) & 0x3
+    if np.any(codes == 2):
+        raise ValueError("reserved ternary code 10 in weight blob - "
+                         "refusing to run inference")
+    return np.where(codes == 0, 0,
+                    np.where(codes == 1, 1, -1)).astype(np.int64)
+
+
 def ternary_project(w, thresh_scale=0.75, per_neuron=False):
     """Project a float weight matrix onto {-1, 0, +1} with power-of-two
     scales (Tier 4 Part A, docs/TIER4_DESIGN.md).
@@ -682,13 +708,7 @@ class Tier2Network:
             for li, w in enumerate((self.w1, self.w2, self.w3)):
                 s, k = self._project(w, li)
                 ks.append(k)
-                flat = s.T.astype(np.int8).ravel()
-                codes = np.where(flat == 0, 0,
-                                 np.where(flat > 0, 1, 3)).astype(np.uint8)
-                assert not np.any(codes == 2), "reserved ternary code 10"
-                q = codes.reshape(-1, 4)
-                blocks.append((q[:, 0] | (q[:, 1] << 2) | (q[:, 2] << 4)
-                               | (q[:, 3] << 6)).astype(np.uint8).tobytes())
+                blocks.append(pack_ternary(s))
             packed = b"".join(blocks)
             n_weights = (self.w1.size + self.w2.size + self.w3.size)
             assert len(packed) == n_weights // 4, \
@@ -826,16 +846,7 @@ def simulate_assembly_forward(weights_file, input_vec):
                               table[n_h1 + n_h2:])
                 else:                          # v4a: one k per layer
                     shifts = (header[25], header[26], header[27])
-                raw = f.read(n_weights // 4)
-                packed = np.frombuffer(raw, dtype=np.uint8)
-                codes = np.empty(n_weights, dtype=np.uint8)
-                for j in range(4):             # weight i in bits 2·(i mod 4)
-                    codes[j::4] = (packed >> (2 * j)) & 0x3
-                if np.any(codes == 2):
-                    raise ValueError("reserved ternary code 10 in weight "
-                                     "blob - refusing to run inference")
-                w = np.where(codes == 0, 0,
-                             np.where(codes == 1, 1, -1)).astype(np.int64)
+                w = unpack_ternary(f.read(n_weights // 4), n_weights)
             else:                              # Q8.8 int16
                 raw = f.read(n_weights * 2)
                 w = np.frombuffer(raw, dtype='<i2').astype(np.int64)
@@ -869,6 +880,102 @@ def simulate_assembly_forward(weights_file, input_vec):
     output = np.where(acc < -8192, 0,
              np.where(acc > 8192, 32767, (acc + 8192) << 1)).astype(np.int32)
     return output
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Format v5: recurrent ternary (Tier 4 Part B — the graduated SSM law)
+#
+# Header: [0:2]='DN' [2]=5 [3]=4 [4]=5 layers, [5..14] five u16 sizes
+# (in=8, H, r1, r2, out), [16] u32 total ternary weight count,
+# [20]=1 (ternary), [21] u32 CRC over the whole payload,
+# [25..28] per-layer shifts (k_in, k1, k2, k3).
+# Payload: decay table (H bytes, d_c with lambda_c = 1 - 2^-d_c)
+# followed by packed ternary blocks: Win (in x H), W1 (H x r1),
+# W2 (r1 x r2), W3 (r2 x out). The table is law; the CRC covers it.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_v5(filename, d, mats, shifts):
+    """Write a v5 blob. d: decay byte vector (H,); mats: ternary sign
+    matrices (win, w1, w2, w3) shaped (in,H),(H,r1),(r1,r2),(r2,out);
+    shifts: (k_in, k1, k2, k3)."""
+    win, w1, w2, w3 = mats
+    sizes = (win.shape[0], win.shape[1], w1.shape[1], w2.shape[1],
+             w3.shape[1])
+    assert w1.shape[0] == sizes[1] and w2.shape[0] == sizes[2] \
+        and w3.shape[0] == sizes[3] and len(d) == sizes[1]
+    n = sum(m.size for m in mats)
+    payload = np.asarray(d, dtype=np.uint8).tobytes() + \
+        b"".join(pack_ternary(m) for m in mats)
+    crc = crc32(payload)
+
+    header = bytearray(HEADER_SIZE)
+    header[0:2] = b'DN'
+    header[2], header[3], header[4] = 5, 4, 5
+    for i, sz in enumerate(sizes):
+        struct.pack_into('<H', header, 5 + 2 * i, sz)
+    struct.pack_into('<I', header, 16, n)
+    header[20] = 1
+    struct.pack_into('<I', header, 21, crc)
+    header[25], header[26], header[27], header[28] = shifts
+
+    with open(filename, 'wb') as f:
+        f.write(header)
+        f.write(payload)
+        total = HEADER_SIZE + len(payload)
+        f.write(bytes(((total + 511) // 512) * 512 - total))
+    print(f"Saved v5 weights to {filename}: {n:,} ternary + {len(d)}-byte "
+          f"decay table, CRC32 0x{crc:08X}")
+    return crc
+
+
+class SsmMachine:
+    """The stateful law (v5): one instance == one machine's cognition.
+    step(key) is one tick; h is the working memory and is exactly what
+    the kernel will hold at h_base. Bit-exact integer arithmetic only."""
+
+    def __init__(self, weights_file):
+        with open(weights_file, 'rb') as f:
+            header = f.read(HEADER_SIZE)
+            if header[2] != 5:
+                raise ValueError(f"not a v5 blob (version {header[2]})")
+            sizes = struct.unpack_from('<HHHHH', header, 5)
+            self.n_in, self.H, r1, r2, n_out = sizes
+            self.shifts = tuple(header[25:29])
+            self.d = np.frombuffer(f.read(self.H),
+                                   dtype=np.uint8).astype(np.int64)
+            counts = (self.n_in * self.H, self.H * r1, r1 * r2, r2 * n_out)
+            dims = ((self.n_in, self.H), (self.H, r1), (r1, r2), (r2, n_out))
+            self.mats = []
+            for c, (di, do) in zip(counts, dims):
+                w = unpack_ternary(f.read(c // 4), c)
+                self.mats.append(w.reshape(do, di).T)
+        self.reset()
+
+    def reset(self):
+        self.h = np.zeros(self.H, dtype=np.int64)
+
+    def step(self, key):
+        """One tick: decay, drive, clamp, readout. Returns the 64 raw
+        outputs (piecewise sigmoid applied), argmax[:20] is the command."""
+        x = np.array([(key >> i) & 1 for i in range(self.n_in)],
+                     dtype=np.int64) * 256
+        win, w1, w2, w3 = self.mats
+        k_in, k1, k2, k3 = self.shifts
+        hl = self.h - (self.h >> self.d)
+        self.h = np.clip(hl + ((x @ win) >> k_in), -32768, 32767)
+        z1 = np.clip((self.h @ w1) >> k1, 0, 32767)
+        z2 = np.clip((z1 @ w2) >> k2, 0, 32767)
+        acc = (z2 @ w3) >> k3
+        return np.where(acc < -8192, 0,
+                        np.where(acc > 8192, 32767, (acc + 8192) * 2))
+
+    def run(self, keys):
+        """Fresh machine, feed keys oldest->newest, return final outputs."""
+        self.reset()
+        out = None
+        for k in keys:
+            out = self.step(k)
+        return out
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Validation
