@@ -296,15 +296,25 @@ conversation. Order is deliberate.
    suite — at held width and smaller epoch budget, structure costs
    ~2 points and buys plurality; the equal-total-params economics
    test remains open.
-6. ✅ **Intent compiler, reference mode** (`tools/intent_compiler.py`,
-   gated by `intent_test.py` in CI): a fixed interview compiles
-   deterministically into a hash-chained config log (ledger.Ledger is
-   the one chain authority) that REFERENCES laws by stable commitment
-   (v5 whole-file CRC, forest manifest CRC). Same answers = byte-
-   identical log; invalid intent refused; tamper fails audit.
-   Provision mode (choosing/creating structure) waits on the
-   leaf-creation claim grammar, per the S3 verdict. Original vision
-   (NL interview host-side) unchanged: NL
+6. ✅ **Intent compiler, reference + provision modes**
+   (`tools/intent_compiler.py`, gated by `intent_test.py` in CI): a
+   fixed interview compiles deterministically into a hash-chained
+   config log (ledger.Ledger is the one chain authority) that
+   REFERENCES laws by stable commitment (v5 whole-file CRC, forest
+   manifest CRC). Same answers = byte-identical log; invalid intent
+   refused; tamper fails audit.
+   ✅ **Provision mode (2026-07-11)**: a specialist answer compiles
+   into a provision event — the `create_leaf` claim TEMPLATE in the
+   structural grammar: op, next leaf index, carved scope, the base
+   manifest's commitment, and the policy training tuple. The two
+   claimed CRCs are deliberately absent: they are training outputs,
+   so they belong to the fulfillment — a builder trains the leaf,
+   completes the claim, and submits it to the ledger, where
+   verification is structural replay. The gate proves the template
+   speaks the grammar (`validate_structure` must accept the compiled
+   template completed with the inline manifest); structure-intent
+   with no manifest to extend is refused; "none" compiles no
+   provision. Original vision (NL interview host-side) unchanged: NL
    interview → canonical config event log → deterministic client/shell
    configuration; the conversation is ephemeral, the log is law.
 
