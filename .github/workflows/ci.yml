@@ -76,6 +76,9 @@ jobs:
       - name: Forest structure gate (S3 - hard routing, bit-exact views)
         run: python3 tools/s3_forest.py --smoke
 
+      - name: Intent compiler gate (config is law, conversation is ephemeral)
+        run: python3 tools/intent_test.py
+
       - name: Rust determinism layers (IAL + NDAL)
         run: |
           cargo test --manifest-path ial/Cargo.toml
