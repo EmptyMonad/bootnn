@@ -222,11 +222,17 @@ conversation. Order is deliberate.
    mint additionally requires the replayed artifact to clear a
    held-out quality bar (default 95%, an explicit policy knob recorded
    in every verdict). Honest-but-weak work is rejected with the reason
-   on the ledger; dishonest claims never get a gauntlet run. Gated in
-   ledger_test. Remaining: dataset-delta claims (train.py must accept
-   a data contribution, not just hyperparams), ML-DSA signatures on
-   entries, SPHINCS+ identities, hardware-profile reward class
-   (portability mints).
+   on the ledger; dishonest claims never get a gauntlet run.
+   ✅ **Dataset-delta claims**: a contribution can now add training
+   *examples*, not just tune knobs. `train.py --data-delta` appends
+   JSONL examples deterministically (empty delta is a verified no-op —
+   canonical CRC unchanged); the claim carries the delta inline, so
+   the log fully determines the replay and a verifier reproduces the
+   contributor's exact CRC. ledger_test proves it: carol teaches a new
+   key, the delta provably moves the artifact, and it mints by replay.
+   Remaining: ML-DSA signatures on entries + SPHINCS+ identities
+   (**deferred — needs a PQ-crypto dependency decision**), hardware-
+   profile reward class (portability mints).
 5. 📋 **S3 spike — two specialists + a router** (SWARM_DESIGN, S3):
    train two blobs on disjoint command subsets, host-side router,
    measure against one equal-weight generalist. Falsifies (or funds)

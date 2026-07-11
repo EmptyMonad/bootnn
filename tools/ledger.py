@@ -143,17 +143,29 @@ MINT_MIN_HELDOUT = 95.0
 
 
 def replay_claim(claim, out):
-    """Verification IS replay: rerun the training, CRC the artifact."""
+    """Verification IS replay: rerun the training, CRC the artifact.
+    A dataset-delta claim carries its examples inline, so the delta is
+    part of the log and the replay is fully determined by it."""
     cmd = [sys.executable, str(TRAIN),
            "--seed", str(claim["seed"]),
            "--epochs", str(claim["epochs"]),
            "--lr", str(claim["lr"]),
            "--output", str(out)]
+    delta = claim.get("data_delta") or []
+    delta_ctx = tempfile.TemporaryDirectory() if delta else None
+    if delta:
+        dpath = Path(delta_ctx.name) / "delta.jsonl"
+        dpath.write_text("".join(canonical(r) + "\n" for r in delta))
+        cmd += ["--data-delta", str(dpath)]
     print(f"[ledger] replaying: {' '.join(cmd[1:])}")
     # train.py's exit code also gates accuracy/divergence; the ledger
     # asks separately (a) is the artifact reproduced, (b) does it pass
     # the quality gauntlet.
-    subprocess.run(cmd, capture_output=True, timeout=3600)
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=3600)
+    finally:
+        if delta_ctx:
+            delta_ctx.cleanup()
     if not out.is_file():
         return None
     return crc32(out.read_bytes()) & 0xFFFFFFFF
@@ -180,6 +192,10 @@ def main():
     p.add_argument("--lr", type=float, required=True)
     p.add_argument("--claimed-crc", required=True,
                    help="CRC32 of the claimed weight blob (hex ok)")
+    p.add_argument("--data-delta",
+                   help="JSONL of contributed examples "
+                        "({\"keys\":[..],\"cmd\":name}); stored inline in "
+                        "the claim so replay is fully determined by the log")
 
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
     p.add_argument("--claim", type=int, required=True)
@@ -200,11 +216,19 @@ def main():
     led = Ledger(args.ledger)
 
     if args.cmd == "submit":
-        e = led.append("claim", {
-            "account": args.account, "seed": args.seed,
-            "epochs": args.epochs, "lr": args.lr,
-            "claimed_crc": int(args.claimed_crc, 0)})
-        print(f"[ledger] claim recorded as entry {e['idx']}")
+        delta = []
+        if args.data_delta:
+            for ln in Path(args.data_delta).read_text().splitlines():
+                if ln.strip():
+                    delta.append(json.loads(ln))
+        data = {"account": args.account, "seed": args.seed,
+                "epochs": args.epochs, "lr": args.lr,
+                "claimed_crc": int(args.claimed_crc, 0)}
+        if delta:
+            data["data_delta"] = delta
+        e = led.append("claim", data)
+        print(f"[ledger] claim recorded as entry {e['idx']}"
+              + (f" (+{len(delta)} contributed examples)" if delta else ""))
 
     elif args.cmd == "verify":
         claim = next((e["data"] for e in led.entries

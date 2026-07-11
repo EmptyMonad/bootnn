@@ -18,6 +18,7 @@ Usage:
 import numpy as np
 import struct
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -112,13 +113,34 @@ def command_to_output(cmd_idx, dx=0, dy=0):
 # Training Data Generation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_training_data(ctx_rng=None):
+def load_data_delta(path):
+    """A dataset-delta contribution (S2): JSONL, one {"keys":[ascii...],
+    "cmd":"rect"} per line — extra examples a contributor asserts the
+    law should learn. Returned in file order so the training set (hence
+    the weight CRC) is a deterministic function of the delta content."""
+    if not path:
+        return []
+    delta = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        delta.append(([int(k) for k in rec["keys"]], CMD[rec["cmd"]]))
+    return delta
+
+
+def generate_training_data(ctx_rng=None, extra=None):
     """Generate comprehensive training examples.
 
     `ctx_rng` drives the random-history augmentation; passing a persistent
     generator yields a fresh context sample per call (used by train() to
     resample contexts during training so the network learns the history
-    *distribution* instead of memorizing a fixed set)."""
+    *distribution* instead of memorizing a fixed set).
+
+    `extra` is a dataset delta: a list of (keys, cmd_idx) appended in
+    order, so a contribution of new examples is part of the law by
+    replay (see tools/ledger.py)."""
     data = []
 
     # --- Single key commands ---
@@ -240,6 +262,12 @@ def generate_training_data(ctx_rng=None):
             inp = sequence_to_input([ord('e'), ord('n'), ord('i'), ord('l')])
             out = command_to_output(CMD['hline'])
             data.append((inp, out, "demo: line → hline"))
+
+    # --- Dataset-delta contribution (S2), appended in order ---
+    for keys, cmd_idx in (extra or []):
+        data.append((sequence_to_input(keys), command_to_output(cmd_idx),
+                     f"delta: {''.join(chr(k) for k in keys)} → "
+                     f"{CMD_NAMES[cmd_idx]}"))
 
     return data
 
@@ -1063,13 +1091,20 @@ def main():
                         help='v4b: one sar count per neuron from its own '
                              'row magnitudes (byte table after header) - '
                              '16x finer scale resolution, still no imul')
+    parser.add_argument('--data-delta',
+                        help='S2 dataset-delta contribution: JSONL of '
+                             '{"keys":[ascii...],"cmd":name} appended to '
+                             'the training set (deterministic by content)')
     args = parser.parse_args()
 
     # Deterministic NOS: fixed seed → identical "canonical" weights every build.
     np.random.seed(args.seed)
 
-    # Generate training data
-    data = generate_training_data()
+    # Generate training data (+ any dataset-delta contribution)
+    delta = load_data_delta(args.data_delta)
+    if delta:
+        print(f"Dataset delta: +{len(delta)} contributed examples")
+    data = generate_training_data(extra=delta)
     print(f"Generated {len(data)} training examples")
     print(f"Network: {' → '.join(str(s) for s in LAYER_SIZES)}")
     print(f"Weights: {TOTAL_WEIGHTS:,}")
@@ -1089,7 +1124,7 @@ def main():
                        per_neuron_shifts=args.per_neuron_shifts)
     net.train(data, epochs=args.epochs, lr=args.lr,
               resample_every=args.resample_every,
-              resample=lambda: generate_training_data(ctx_stream))
+              resample=lambda: generate_training_data(ctx_stream, extra=delta))
     net.test(data)
     net.save(args.output)
 

@@ -109,6 +109,33 @@ def main():
         print(f"[ledger_test] result: FAIL (post-transfer balances {b})")
         sys.exit(1)
 
+    # ── dataset-delta claim: contribute new EXAMPLES, not just knobs ─────
+    # carol teaches a key the base set never had; the delta rides inline
+    # in the claim, so a verifier reproduces her exact CRC by replay.
+    delta = tmp / "carol_delta.jsonl"
+    delta.write_text(json.dumps({"keys": [ord("q")], "cmd": "rect"}) + "\n")
+    carol_blob = tmp / "carol.bin"
+    subprocess.run([sys.executable, str(TRAIN), "--seed", str(SEED),
+                    "--epochs", str(EPOCHS), "--lr", str(LR),
+                    "--data-delta", str(delta), "--output", str(carol_blob)],
+                   capture_output=True, timeout=3600)
+    ccrc = crc32(carol_blob.read_bytes()) & 0xFFFFFFFF
+    # The delta must actually move the artifact (else it is not a
+    # contribution): a delta'd blob differs from the no-delta blob.
+    if ccrc == crc:
+        print("[ledger_test] result: FAIL (delta did not change the law)")
+        sys.exit(1)
+    led(ledger, "submit", "--account", "carol", "--seed", str(SEED),
+        "--epochs", str(EPOCHS), "--lr", str(LR),
+        "--data-delta", str(delta), "--claimed-crc", hex(ccrc))
+    out = led(ledger, "verify", "--claim", "7", "--min-heldout", "0")
+    if "VERIFIED" not in out:
+        print("[ledger_test] result: FAIL (delta claim not verified by replay)")
+        sys.exit(1)
+    if balances(ledger).get("carol", 0) != 100:
+        print("[ledger_test] result: FAIL (delta claim did not mint)")
+        sys.exit(1)
+
     # ── no double mint ───────────────────────────────────────────────────
     led(ledger, "verify", "--claim", "2", expect_fail=True)
 
