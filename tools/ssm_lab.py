@@ -169,8 +169,8 @@ class SsmLab:
         return (2.0 ** -np.asarray(k, dtype=np.float64)) * s
 
     def train(self, epochs, lr, resample, resample_every=25,
-              freeze=200, log_every=500):
-        val = gen_sequences(np.random.default_rng(555000))
+              freeze=200, log_every=500, val_data=None):
+        val = val_data or gen_sequences(np.random.default_rng(555000))
         Xv, cv = encode(val)
         data = resample()
         X, cls = encode(data)

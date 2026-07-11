@@ -233,10 +233,29 @@ conversation. Order is deliberate.
    Remaining: ML-DSA signatures on entries + SPHINCS+ identities
    (**deferred — needs a PQ-crypto dependency decision**), hardware-
    profile reward class (portability mints).
-5. 📋 **S3 spike — two specialists + a router** (SWARM_DESIGN, S3):
-   train two blobs on disjoint command subsets, host-side router,
-   measure against one equal-weight generalist. Falsifies (or funds)
-   the emergent-architecture claim at N=2.
+5. ✅ **S3 spike — branching-leaf specialists, structure-first**
+   (`tools/s3_forest.py`): two 512-ch v5 leaves behind a hard static
+   router (total function key→leaf; no blending, no parameters; the
+   path is a pure function of the log). Structure gate in CI (no
+   training): routed forest == isolated per-leaf views, bit-exact,
+   including the non-deciding leaf's state.
+   **LAW SHAPE (empirical): one law PER LEAF.** Each leaf trains from
+   its own seed to its own CRC; the composite exists only as a derived
+   commitment — canonical manifest (router table + leaf whole-file
+   CRCs), CRC'd. There is no monolithic artifact. Consequences:
+   example contributions stay inline deltas (a delta IS a leaf-L
+   contribution because its trigger routes there; per-leaf replay
+   verifies); **leaf creation/scoping is NOT expressible as a delta**
+   — needs a structural claim field (router version + scope),
+   deferred. Worth oracle stubbed as a port (`ledger.WorthOracle`,
+   software/null impl = deterministic gauntlet; one physical root,
+   logical ports per specialist; attestation swaps in later).
+   Trained spike (4k epochs/leaf, scoped to single-key+ctx; words
+   stay generalist — letters cross leaves): leaf heldout 97.6/97.7%,
+   composite 97.6% (≥95 gate), generalist baseline 99.8% on the same
+   suite — at held width and smaller epoch budget, structure costs
+   ~2 points and buys plurality; the equal-total-params economics
+   test remains open.
 6. 🔬 **Intent compiler prototype** (host-side, after S1 v1): NL
    interview → canonical config event log → deterministic client/shell
    configuration; the conversation is ephemeral, the log is law.

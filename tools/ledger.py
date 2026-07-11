@@ -180,6 +180,41 @@ def gauntlet(blob, per_key=20):
     return 100.0 * correct / total
 
 
+class WorthOracle:
+    """The worth-measurement PORT (NDAL seam). Everything the economy
+    knows about an artifact's value enters through here, so the
+    measurement's *provenance* is swappable without touching the
+    ledger: today a deterministic software gauntlet; later a TPM-,
+    PUF-, or throughput-attested oracle. One physical root per
+    substrate; logical ports are derived per specialist, so a
+    branching law measures each leaf through its own named port."""
+
+    def port(self, specialist_id):
+        return _OraclePort(self, specialist_id)
+
+    def measure(self, blob, specialist_id="root"):
+        raise NotImplementedError
+
+
+class _OraclePort:
+    def __init__(self, root, specialist_id):
+        self.root, self.specialist_id = root, specialist_id
+
+    def measure(self, blob):
+        return self.root.measure(blob, self.specialist_id)
+
+
+class SoftwareOracle(WorthOracle):
+    """Null/software implementation: worth == the deterministic
+    held-out gauntlet. No attestation - the root of trust is replay."""
+
+    def measure(self, blob, specialist_id="root"):
+        return gauntlet(blob)
+
+
+WORTH_ORACLE = SoftwareOracle()
+
+
 def main():
     ap = argparse.ArgumentParser(description="DNOS contribution ledger (S2)")
     ap.add_argument("--ledger", required=True)
@@ -247,10 +282,11 @@ def main():
             replay_ok = computed == claim["claimed_crc"]
             heldout = None
             if replay_ok:
-                # Honest - now is it WORTH anything? Quality gauntlet on
-                # the replayed artifact (dishonest claims skip it: there
-                # is nothing of theirs to measure).
-                heldout = round(gauntlet(blob), 1)
+                # Honest - now is it WORTH anything? Worth enters through
+                # the oracle port named for the specialist (dishonest
+                # claims skip it: nothing of theirs to measure).
+                port = WORTH_ORACLE.port(claim.get("leaf", "root"))
+                heldout = round(port.measure(blob), 1)
         verified = bool(replay_ok and heldout is not None
                         and heldout >= args.min_heldout)
         e = led.append("verdict", {

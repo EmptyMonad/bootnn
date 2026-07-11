@@ -22,3 +22,5 @@ __pycache__/
 final_state.png
 Cargo.lock
 dnos_corrupt*.img
+weights_leaf*.bin
+forest_manifest.json
