@@ -68,7 +68,16 @@ class Ledger:
 
     # ── the fold: state is derived, never stored ────────────────────────
     def fold(self):
-        """Replay the log from genesis. Returns (balances, errors)."""
+        """Replay the log from genesis. Returns (balances, errors).
+
+        Authorship anchors to THIS log: precedence is append order, and
+        integrity is the hash chain below - identity-free by default. An
+        optional `author` envelope (hash-based one-time signature over
+        the entry body) rides alongside; when present it is verified for
+        integrity, but it NEVER gates reward. The mint reads only
+        `verdict.verified` (= replay_ok AND gauntlet) - so an anonymous
+        claim and a signed one mint identically, and optional stays
+        optional under economic pressure."""
         balances = {}
         errors = []
         claims = {}
@@ -81,6 +90,18 @@ class Ledger:
                 prev = e["hash"]
                 continue
             prev = e["hash"]
+            # Optional authorship proof: registry-free, provable without
+            # lookup. Absent -> anonymous (no error). Present -> must
+            # verify against the entry hash and its own embedded pubkey,
+            # and its ssid must self-certify. A forged/tampered envelope
+            # is an integrity error, not a reward event.
+            author = e.get("author")
+            if author is not None:
+                from hbss import ssid_of_hex, verify
+                if not verify(author["pubkey"], e["hash"], author["sig"]):
+                    errors.append(f"entry {e['idx']}: author signature invalid")
+                elif ssid_of_hex(author["pubkey"]) != author["ssid"]:
+                    errors.append(f"entry {e['idx']}: ssid does not certify")
             d = e["data"]
             if e["type"] == "claim":
                 claims[e["idx"]] = d
@@ -106,7 +127,7 @@ class Ledger:
                     balances[dst] = balances.get(dst, 0) + amt
         return balances, errors
 
-    def append(self, etype, data):
+    def append(self, etype, data, author_seed=None):
         # A transfer must be valid against the folded state *now*;
         # a verdict must be the first for its claim.
         balances, errors = self.fold()
@@ -127,8 +148,18 @@ class Ledger:
                              f"has a verdict (entry {e['idx']})")
         idx = len(self.entries)
         prev = self.entries[-1]["hash"] if self.entries else GENESIS
+        h = entry_hash(idx, prev, etype, data)
         e = {"idx": idx, "prev": prev, "type": etype, "data": data,
-             "hash": entry_hash(idx, prev, etype, data)}
+             "hash": h}
+        # Optional authorship proof: signs the entry HASH (which binds
+        # idx+prev+type+data), so the signature covers position and
+        # content but sits OUTSIDE the hashed body - it cannot perturb
+        # the chain, and anonymous vs signed produce the same chain.
+        if author_seed is not None:
+            from hbss import keypair, pk_hex, sign, ssid
+            sk, pk = keypair(author_seed)
+            e["author"] = {"ssid": ssid(pk), "pubkey": pk_hex(pk),
+                           "sig": sign(sk, h)}
         self.entries.append(e)
         with self.path.open("a") as f:
             f.write(canonical(e) + "\n")
@@ -231,6 +262,11 @@ def main():
                    help="JSONL of contributed examples "
                         "({\"keys\":[..],\"cmd\":name}); stored inline in "
                         "the claim so replay is fully determined by the log")
+    p.add_argument("--author-seed",
+                   help="optional self-sovereign authorship: sign the "
+                        "claim with a hash-based one-time key derived "
+                        "from this seed (registry-free; never gates "
+                        "reward)")
 
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
     p.add_argument("--claim", type=int, required=True)
@@ -261,9 +297,12 @@ def main():
                 "claimed_crc": int(args.claimed_crc, 0)}
         if delta:
             data["data_delta"] = delta
-        e = led.append("claim", data)
+        e = led.append("claim", data, author_seed=args.author_seed)
+        who = (f" signed ssid {e['author']['ssid'][:12]}..."
+               if "author" in e else " (anonymous)")
         print(f"[ledger] claim recorded as entry {e['idx']}"
-              + (f" (+{len(delta)} contributed examples)" if delta else ""))
+              + (f" (+{len(delta)} contributed examples)" if delta else "")
+              + who)
 
     elif args.cmd == "verify":
         claim = next((e["data"] for e in led.entries

@@ -230,8 +230,20 @@ conversation. Order is deliberate.
    the log fully determines the replay and a verifier reproduces the
    contributor's exact CRC. ledger_test proves it: carol teaches a new
    key, the delta provably moves the artifact, and it mints by replay.
-   Remaining: ML-DSA signatures on entries + SPHINCS+ identities
-   (**deferred — needs a PQ-crypto dependency decision**), hardware-
+   ✅ **Authorship (decided 2026-07-10)**: identity is optional and
+   never gates reward. Precedence + integrity anchor to the append-only
+   log itself (identity-free by default). An optional self-sovereign
+   ID rides as a **registry-free, provable-without-lookup** proof —
+   hash-based one-time signatures (Lamport/blake2b, `tools/hbss.py`,
+   stdlib only, post-quantum; the SSID is `hash(pubkey)`, self-
+   certifying). The signature covers the entry hash but sits outside
+   the hashed body, so anonymous and signed claims share one chain.
+   The fold verifies a present envelope (a forgery fails audit) but the
+   mint reads only `verified` (= replay_ok ∧ gauntlet) — proven by
+   `authorship_test`: anon and signed mint byte-identically. Optional
+   stays optional under economic pressure. Deferred within this: a
+   persistent multi-signature identity (Merkle tree of HBSS leaves) —
+   the one-time keys are per-entry today. Remaining S2: hardware-
    profile reward class (portability mints).
 5. ✅ **S3 spike — branching-leaf specialists, structure-first**
    (`tools/s3_forest.py`): two 512-ch v5 leaves behind a hard static
