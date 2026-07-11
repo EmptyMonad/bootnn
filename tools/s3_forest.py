@@ -52,36 +52,60 @@ from ssm_lab import (HISTORY_POOL, SINGLE_KEYS, SsmLab,  # noqa: E402
 from train import CMD, CMD_NAMES, SsmMachine, save_v5  # noqa: E402
 
 # ── the router: a static TOTAL function, versioned by its content ──────
+# The table is DATA, not code: structure claims (create_leaf) derive new
+# tables from it, so the swarm's architecture is a fold over the log.
 DRAW_KEYS = set("pd.brlh-v|ofcu ")          # trigger keys, draw/meta class
 MOTION_KEYS = set("wksja+")                 # trigger keys, motion/color
 ROUTER_VERSION = 1
+FALLBACK_MOD = 2      # junk-key routing, PINNED: adding leaves must not
+                      # silently re-route history noise
 
 
-def route(key):
-    """key (int) -> leaf id. Hard, deterministic, total: trigger keys by
-    class; everything else (history junk) by parity. No state, no
-    parameters - the path is a pure function of the event."""
+def base_table():
+    """Router version 1: the spike's two-leaf structure, as data."""
+    return {"version": ROUTER_VERSION,
+            "scopes": [sorted(DRAW_KEYS), sorted(MOTION_KEYS)],
+            "fallback_mod": FALLBACK_MOD}
+
+
+def route(key, table=None):
+    """key (int) -> leaf id. Hard, deterministic, total: explicitly
+    scoped keys to their leaf; everything else (history junk) by parity
+    over the PINNED fallback modulus. No state, no parameters - the
+    path is a pure function of the event and the table."""
+    if table is None:
+        table = base_table()
     c = chr(key) if 0 <= key < 128 else ""
-    if c in DRAW_KEYS:
-        return 0
-    if c in MOTION_KEYS:
-        return 1
-    return key % 2
+    for leaf, scope in enumerate(table["scopes"]):
+        if c in scope:
+            return leaf
+    return key % table["fallback_mod"]
 
 
-def leaf_view(keys, leaf):
+def derive_table(base, scope):
+    """A create_leaf claim's table derivation: the new leaf's scope is
+    CARVED from wherever its keys lived (explicit scopes or the
+    fallback pool); the fallback modulus is pinned; the version
+    increments. Pure - the new structure is a function of (base, scope)."""
+    return {"version": base["version"] + 1,
+            "scopes": [[k for k in s if k not in scope]
+                       for s in base["scopes"]] + [sorted(scope)],
+            "fallback_mod": base["fallback_mod"]}
+
+
+def leaf_view(keys, leaf, table=None):
     """The subsequence a leaf sees: exactly the events routed to it."""
-    return [k for k in keys if route(k) == leaf]
+    return [k for k in keys if route(k, table) == leaf]
 
 
-def gen_scoped(leaf, ctx_rng=None, ctx_per_key=16):
+def gen_scoped(leaf, ctx_rng=None, ctx_per_key=16, table=None):
     """Scoped training data: this leaf's trigger keys, each under random
     FULL-WORLD histories filtered to the leaf's view - training sees
     precisely what inference will see."""
     if ctx_rng is None:
         ctx_rng = np.random.default_rng(20260610)
     triggers = [(k, cmd) for k, cmd in SINGLE_KEYS
-                if route(ord(k)) == leaf]
+                if route(ord(k), table) == leaf]
     data = []
     for k, cmd in triggers:
         data.append(([ord(k)], CMD[cmd], f"{k} -> {cmd}"))
@@ -90,24 +114,25 @@ def gen_scoped(leaf, ctx_rng=None, ctx_per_key=16):
             hist_len = int(ctx_rng.integers(1, 64))
             hist = [int(ctx_rng.choice(HISTORY_POOL))
                     for _ in range(hist_len)]
-            seq = leaf_view(hist, leaf) + [ord(k)]
+            seq = leaf_view(hist, leaf, table) + [ord(k)]
             data.append((seq, CMD[cmd], f"{k} -> {cmd} +ctx{v}"))
     return data
 
 
 class ForestMachine:
-    """Two stateful laws behind the router. step(key) advances EXACTLY
+    """N stateful laws behind the router. step(key) advances EXACTLY
     ONE leaf (single path) and returns its decision."""
 
-    def __init__(self, blob0, blob1):
-        self.leaves = [SsmMachine(str(blob0)), SsmMachine(str(blob1))]
+    def __init__(self, blobs, table=None):
+        self.table = table if table is not None else base_table()
+        self.leaves = [SsmMachine(str(b)) for b in blobs]
 
     def reset(self):
         for m in self.leaves:
             m.reset()
 
     def step(self, key):
-        return self.leaves[route(key)].step(key)
+        return self.leaves[route(key, self.table)].step(key)
 
     def run(self, keys):
         self.reset()
@@ -117,16 +142,21 @@ class ForestMachine:
         return out
 
 
-def manifest_for(blobs):
+def manifest_of(table, leaf_crcs):
     """The composite law: canonical JSON committing to router + leaves.
     Its CRC is DERIVED from parts - there is no monolithic artifact."""
-    m = {"router_version": ROUTER_VERSION,
-         "draw_keys": sorted(DRAW_KEYS), "motion_keys": sorted(MOTION_KEYS),
-         "leaves": [{"leaf": i,
-                     "crc": crc32(Path(b).read_bytes()) & 0xFFFFFFFF}
-                    for i, b in enumerate(blobs)]}
+    m = {"router_version": table["version"],
+         "scopes": table["scopes"], "fallback_mod": table["fallback_mod"],
+         "leaves": [{"leaf": i, "crc": c} for i, c in enumerate(leaf_crcs)]}
     blob = json.dumps(m, sort_keys=True, separators=(",", ":"))
     return m, crc32(blob.encode()) & 0xFFFFFFFF
+
+
+def manifest_for(blobs, table=None):
+    """manifest_of over blob files (CRCs read from disk)."""
+    return manifest_of(table if table is not None else base_table(),
+                       [crc32(Path(b).read_bytes()) & 0xFFFFFFFF
+                        for b in blobs])
 
 
 def eval_forest(machine_run, data):
@@ -137,10 +167,11 @@ def eval_forest(machine_run, data):
     return 100.0 * hits / len(data)
 
 
-def heldout_scoped(leaf, per_key=50):
+def heldout_scoped(leaf, per_key=50, table=None):
     rng = np.random.default_rng(99173)
     data = []
-    for k, cmd in [(k, c) for k, c in SINGLE_KEYS if route(ord(k)) == leaf]:
+    for k, cmd in [(k, c) for k, c in SINGLE_KEYS
+                   if route(ord(k), table) == leaf]:
         for _ in range(per_key):
             hl = int(rng.integers(0, 64))
             hist = [int(rng.choice(HISTORY_POOL)) for _ in range(hl)]
@@ -148,40 +179,156 @@ def heldout_scoped(leaf, per_key=50):
     return data
 
 
+# ── the structural claim grammar (the one thing a delta can't say) ─────
+# A create_leaf claim is the S2 contribution that changes STRUCTURE:
+# it carries the manifest it extends (inline, CRC-bound), the carved
+# scope, and the new leaf's training tuple. Verification is replay -
+# re-derive the table, retrain the leaf, re-derive the composite
+# commitment - so architecture, like weights, is a pure function of
+# the log.
+
+def table_of_manifest(m):
+    return {"version": m["router_version"], "scopes": m["scopes"],
+            "fallback_mod": m["fallback_mod"]}
+
+
+def manifest_crc(m):
+    blob = json.dumps(m, sort_keys=True, separators=(",", ":"))
+    return crc32(blob.encode()) & 0xFFFFFFFF
+
+
+def validate_structure(data, prior_manifest_crc=None):
+    """The grammar. Returns None for a well-formed create_leaf claim,
+    else the reason it is refused. Deterministic: validity is a pure
+    function of (claim, chain position)."""
+    if data.get("op") != "create_leaf":
+        return f"unknown structural op: {data.get('op')!r}"
+    base = data.get("base_manifest")
+    if not isinstance(base, dict):
+        return "base_manifest must be carried inline"
+    if manifest_crc(base) != data.get("base_manifest_crc"):
+        return "base_manifest does not hash to base_manifest_crc"
+    if prior_manifest_crc is not None and \
+       data["base_manifest_crc"] != prior_manifest_crc:
+        return "claim does not chain to the last verified structure"
+    if data.get("leaf") != len(base["scopes"]):
+        return (f"leaf must be the next index {len(base['scopes'])}, "
+                f"got {data.get('leaf')}")
+    scope = data.get("scope")
+    if not scope or not isinstance(scope, list):
+        return "scope must be a non-empty list of keys"
+    if any(not isinstance(k, str) or len(k) != 1 for k in scope):
+        return "scope keys must be single characters"
+    if len(set(scope)) != len(scope):
+        return "scope has duplicate keys"
+    if not any(k in scope for k, _ in SINGLE_KEYS):
+        return "scope contains no trainable trigger key"
+    for f in ("seed", "epochs", "lr", "claimed_crc",
+              "claimed_manifest_crc"):
+        if f not in data:
+            return f"missing field: {f}"
+    return None
+
+
+def replay_structure(claim, out):
+    """Verification IS replay, structural form: re-derive the table,
+    retrain the new leaf deterministically on its scoped view, save
+    the blob to `out`, and re-derive the composite commitment.
+    Returns (leaf_crc, manifest_crc, table); the caller compares both
+    CRCs to the claimed values."""
+    base = claim["base_manifest"]
+    table = derive_table(table_of_manifest(base), claim["scope"])
+    leaf = claim["leaf"]
+    np.random.seed(claim["seed"])
+    stream = np.random.default_rng(20260610)
+    lab = SsmLab(h=512, seed=claim["seed"])
+    lab.train(claim["epochs"], claim["lr"],
+              resample=lambda: gen_scoped(leaf, stream, table=table),
+              val_data=gen_scoped(leaf, np.random.default_rng(555000),
+                                  table=table))
+    lab.save(str(out))
+    leaf_crc = crc32(Path(out).read_bytes()) & 0xFFFFFFFF
+    _, mcrc = manifest_of(table,
+                          [x["crc"] for x in base["leaves"]] + [leaf_crc])
+    return leaf_crc, mcrc, table
+
+
+def leaf_gauntlet(blob, leaf, table, per_key=50):
+    """Scoped worth: held-out full-world histories, the leaf measured
+    on ITS OWN VIEW (bit-identical to the routed path, per the smoke
+    gate). This is the software implementation behind the leaf's
+    oracle port."""
+    machine = SsmMachine(str(blob))
+    data = heldout_scoped(leaf, per_key, table)
+    hits = 0
+    for keys, cls, _ in data:
+        out = machine.run(leaf_view(keys, leaf, table))
+        hits += int(np.argmax(out[:20])) == cls
+    return 100.0 * hits / len(data)
+
+
 def smoke():
     """Structure gate, zero training: ForestMachine must equal isolated
-    per-leaf machines fed their own views, bit for bit."""
+    per-leaf machines fed their own views, bit for bit - for the base
+    2-leaf table AND for a table derived by a create_leaf carve. The
+    table-driven router must also reproduce the spike's hardcoded
+    routing key for key."""
+    # Legacy invariance: the table IS the old code path.
+    for k in range(128):
+        c = chr(k)
+        want = 0 if c in DRAW_KEYS else 1 if c in MOTION_KEYS else k % 2
+        assert route(k) == want, f"table-driven route diverged on key {k}"
     tmp = ROOT / "swarm_shots"
     tmp.mkdir(exist_ok=True)
     blobs = []
-    for i in (0, 1):
+    for i in (0, 1, 2):
         np.random.seed(4000 + i)
         lab = SsmLab(h=512, seed=4000 + i)
         p = tmp / f"smoke_leaf{i}.bin"
         lab.save(str(p))
         blobs.append(p)
-    forest = ForestMachine(*blobs)
-    iso = [SsmMachine(str(b)) for b in blobs]
-    rng = np.random.default_rng(7)
-    ok = True
-    for _ in range(20):
-        seq = [int(rng.choice(HISTORY_POOL))
-               for _ in range(int(rng.integers(1, 64)))]
-        out_f = forest.run(seq)
-        views = [leaf_view(seq, i) for i in (0, 1)]
-        last_leaf = route(seq[-1])
-        out_i = iso[last_leaf].run(views[last_leaf])
-        ok &= np.array_equal(np.asarray(out_f), np.asarray(out_i))
-        # And the NON-deciding leaf's state must equal its isolated twin
-        other = 1 - last_leaf
-        iso[other].run(views[other])
-        ok &= np.array_equal(forest.leaves[other].h, iso[other].h)
-    m, ccrc = manifest_for(blobs)
+
+    def bit_exact(blob_list, table, runs):
+        forest = ForestMachine(blob_list, table)
+        iso = [SsmMachine(str(b)) for b in blob_list]
+        rng = np.random.default_rng(7)
+        ok = True
+        for _ in range(runs):
+            seq = [int(rng.choice(HISTORY_POOL))
+                   for _ in range(int(rng.integers(1, 64)))]
+            out_f = forest.run(seq)
+            views = [leaf_view(seq, i, table)
+                     for i in range(len(blob_list))]
+            last_leaf = route(seq[-1], table)
+            out_i = iso[last_leaf].run(views[last_leaf])
+            ok &= np.array_equal(np.asarray(out_f), np.asarray(out_i))
+            # And every NON-deciding leaf's state == its isolated twin
+            for other in range(len(blob_list)):
+                if other == last_leaf:
+                    continue
+                iso[other].run(views[other])
+                ok &= np.array_equal(forest.leaves[other].h, iso[other].h)
+        return ok
+
+    ok = bit_exact(blobs[:2], base_table(), 20)
+    m, ccrc = manifest_for(blobs[:2])
     print(f"[s3] smoke: routed forest == isolated leaf views: "
           f"{'BIT-EXACT' if ok else 'DIVERGED'} (20 random logs)")
     print(f"[s3] composite commitment (derived): {ccrc:#010x} over "
           f"{[hex(x['crc']) for x in m['leaves']]}")
-    return 0 if ok else 1
+    # Structural carve: a third leaf takes undo+fill from the draw
+    # scope; the 3-leaf routed forest must stay bit-exact against
+    # isolated views under the DERIVED table.
+    t3 = derive_table(base_table(), ["u", "f"])
+    assert "u" not in t3["scopes"][0] and "f" not in t3["scopes"][0], \
+        "carve left keys behind"
+    assert route(ord("u"), t3) == 2 and route(ord("f"), t3) == 2
+    ok3 = bit_exact(blobs, t3, 20)
+    m3, ccrc3 = manifest_for(blobs, t3)
+    print(f"[s3] smoke: derived 3-leaf table (carve u,f): "
+          f"{'BIT-EXACT' if ok3 else 'DIVERGED'} (20 random logs), "
+          f"commitment {ccrc3:#010x}")
+    return 0 if (ok and ok3) else 1
 
 
 def main():
@@ -212,7 +359,7 @@ def main():
     m, ccrc = manifest_for(blobs)
     (ROOT / "forest_manifest.json").write_text(
         json.dumps(m, sort_keys=True, indent=1) + "\n")
-    forest = ForestMachine(*blobs)
+    forest = ForestMachine(blobs)
     base = SsmMachine(str(ROOT / "weights_ssm.bin"))
 
     # Held-out per leaf (the leaf's own law shape) and composite.

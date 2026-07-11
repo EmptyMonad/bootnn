@@ -79,6 +79,9 @@ jobs:
       - name: Forest structure gate (S3 - hard routing, bit-exact views)
         run: python3 tools/s3_forest.py --smoke
 
+      - name: Structural claim gate (create_leaf - architecture is a fold over the log)
+        run: python3 tools/structure_test.py
+
       - name: Intent compiler gate (config is law, conversation is ephemeral)
         run: python3 tools/intent_test.py
 

@@ -269,9 +269,25 @@ conversation. Order is deliberate.
    CRCs), CRC'd. There is no monolithic artifact. Consequences:
    example contributions stay inline deltas (a delta IS a leaf-L
    contribution because its trigger routes there; per-leaf replay
-   verifies); **leaf creation/scoping is NOT expressible as a delta**
-   — needs a structural claim field (router version + scope),
-   deferred. Worth oracle stubbed as a port (`ledger.WorthOracle`,
+   verifies); leaf creation/scoping is NOT expressible as a delta —
+   ✅ **structural claim grammar (2026-07-11)**: `create_leaf` claims
+   (inline CRC-bound base manifest, carved scope, training tuple,
+   claimed leaf CRC + claimed composite commitment) make architecture
+   a fold over the log. The router table is data now
+   (`s3_forest.base_table`/`derive_table`; the fallback modulus is
+   pinned so adding leaves never silently re-routes history junk),
+   verification is structural replay — grammar + chain + retrain +
+   BOTH commitments must reproduce — worth is the new leaf's scoped
+   held-out through its oracle port, and the mint is the same
+   identity-blind mint as every claim. Structure claims chain: each
+   must extend the last VERIFIED structure, so rejected claims never
+   mutate the architecture. Gated by `structure_test.py` (9 grammar
+   negatives with reasons, honest end-to-end mint through the CLI,
+   dishonest commitment exposed by replay, stale-base chain refusal)
+   plus the extended s3 smoke (table-driven router == the spike's
+   hardcoded routing key-for-key; a carved 3-leaf forest stays
+   bit-exact against isolated views).
+   Worth oracle stubbed as a port (`ledger.WorthOracle`,
    software/null impl = deterministic gauntlet; one physical root,
    logical ports per specialist; attestation swaps in later).
    Trained spike (4k epochs/leaf, scoped to single-key+ctx; words

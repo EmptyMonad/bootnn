@@ -6,7 +6,10 @@ An append-only, hash-chained event log where:
 
   - a *claim* is a training-contribution tuple
     (account, seed, epochs, lr, claimed_crc) — "I ran this training
-    and got this blob";
+    and got this blob" — or a STRUCTURAL claim (op=create_leaf,
+    grammar in s3_forest.validate_structure): "I carved this scope
+    into a new leaf and got this blob AND this composite commitment".
+    Weights and architecture are both pure functions of the log;
   - a *verdict* is produced by replaying the claim: rerun train.py
     with the tuple, CRC32 the output, compare. Verification IS
     deterministic replay — no committee, no proof system, binary;
@@ -227,6 +230,47 @@ def replay_claim(claim, out):
     return crc32(out.read_bytes()) & 0xFFFFFFFF
 
 
+def prior_structure_crc(entries):
+    """The manifest commitment of the LAST VERIFIED structural claim
+    in the log, or None. Structure claims must chain to it: rejected
+    claims never mutate the architecture."""
+    prior = None
+    claims = {e["idx"]: e["data"] for e in entries if e["type"] == "claim"}
+    for e in entries:
+        if e["type"] == "verdict" and e["data"].get("verified"):
+            c = claims.get(e["data"]["claim_idx"], {})
+            if c.get("op") == "create_leaf":
+                prior = c["claimed_manifest_crc"]
+    return prior
+
+
+def verify_structure(claim, entries):
+    """Structural verification IS structural replay: the grammar and
+    chain are checked, the new leaf is retrained deterministically on
+    its scoped view, and BOTH commitments - the leaf blob CRC and the
+    derived composite manifest CRC - must reproduce. Worth is the new
+    leaf's scoped held-out (the software impl of its oracle port).
+    Returns (replay_ok, leaf_crc, manifest_crc, heldout, reason)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import s3_forest
+    reason = s3_forest.validate_structure(claim, prior_structure_crc(entries))
+    if reason is not None:
+        return False, None, None, None, reason
+    with tempfile.TemporaryDirectory() as td:
+        blob = Path(td) / "leaf.bin"
+        print(f"[ledger] structural replay: create_leaf {claim['leaf']} "
+              f"scope {''.join(claim['scope'])!r} (seed {claim['seed']}, "
+              f"{claim['epochs']} epochs)")
+        leaf_crc, mcrc, table = s3_forest.replay_structure(claim, blob)
+        replay_ok = (leaf_crc == claim["claimed_crc"]
+                     and mcrc == claim["claimed_manifest_crc"])
+        heldout = None
+        if replay_ok:
+            heldout = round(s3_forest.leaf_gauntlet(blob, claim["leaf"],
+                                                    table), 1)
+    return replay_ok, leaf_crc, mcrc, heldout, None
+
+
 def gauntlet(blob, per_key=20):
     """Held-out generalization of an artifact, percent. Deterministic
     (context_eval's fixed seed), format-aware (window or v5)."""
@@ -294,6 +338,28 @@ def main():
                         "each leaf one-time (registry-free; never gates "
                         "reward)")
 
+    p = sub.add_parser("submit-structure",
+                       help="record a create_leaf structural claim - the "
+                            "contribution a delta cannot express")
+    p.add_argument("--account", required=True)
+    p.add_argument("--leaf", type=int, required=True,
+                   help="new leaf id (must be the next index)")
+    p.add_argument("--scope", required=True,
+                   help="keys carved for the new leaf, e.g. 'uf'")
+    p.add_argument("--base-manifest", required=True,
+                   help="JSON file of the composite manifest this claim "
+                        "extends (carried inline, CRC-bound)")
+    p.add_argument("--seed", type=int, required=True)
+    p.add_argument("--epochs", type=int, required=True)
+    p.add_argument("--lr", type=float, required=True)
+    p.add_argument("--claimed-crc", required=True,
+                   help="CRC32 of the new leaf's v5 blob (hex ok)")
+    p.add_argument("--claimed-manifest-crc", required=True,
+                   help="CRC32 of the new composite manifest (hex ok)")
+    p.add_argument("--author-seed",
+                   help="optional persistent Merkle-Lamport authorship "
+                        "(never gates reward)")
+
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
     p.add_argument("--claim", type=int, required=True)
     p.add_argument("--min-heldout", type=float, default=MINT_MIN_HELDOUT,
@@ -330,6 +396,26 @@ def main():
               + (f" (+{len(delta)} contributed examples)" if delta else "")
               + who)
 
+    elif args.cmd == "submit-structure":
+        sys.path.insert(0, str(ROOT / "tools"))
+        import s3_forest
+        base = json.loads(Path(args.base_manifest).read_text())
+        data = {"account": args.account, "op": "create_leaf",
+                "leaf": args.leaf, "scope": sorted(args.scope),
+                "base_manifest": base,
+                "base_manifest_crc": s3_forest.manifest_crc(base),
+                "seed": args.seed, "epochs": args.epochs, "lr": args.lr,
+                "claimed_crc": int(args.claimed_crc, 0),
+                "claimed_manifest_crc": int(args.claimed_manifest_crc, 0)}
+        # Fail fast on grammar (chain position is re-checked at verify;
+        # a hand-crafted malformed claim still gets a rejected verdict).
+        reason = s3_forest.validate_structure(data)
+        if reason is not None:
+            sys.exit(f"ERROR: structural claim refused: {reason}")
+        e = led.append("claim", data, author_seed=args.author_seed)
+        print(f"[ledger] structural claim recorded as entry {e['idx']} "
+              f"(create_leaf {args.leaf}, scope {args.scope!r})")
+
     elif args.cmd == "verify":
         claim = next((e["data"] for e in led.entries
                       if e["idx"] == args.claim and e["type"] == "claim"),
@@ -341,6 +427,32 @@ def main():
                e["data"]["claim_idx"] == args.claim:
                 sys.exit(f"ERROR: claim {args.claim} already has a "
                          f"verdict (entry {e['idx']}) - not replaying")
+        if claim.get("op") == "create_leaf":
+            replay_ok, leaf_crc, mcrc, heldout, reason = \
+                verify_structure(claim, led.entries)
+            verified = bool(replay_ok and heldout is not None
+                            and heldout >= args.min_heldout)
+            vd = {"claim_idx": args.claim, "verified": verified,
+                  "computed_crc": leaf_crc,
+                  "computed_manifest_crc": mcrc,
+                  "replay_ok": replay_ok, "heldout": heldout,
+                  "min_heldout": args.min_heldout}
+            if reason is not None:
+                vd["reason"] = reason
+            led.append("verdict", vd)
+            if reason is not None:
+                outcome = f"REJECTED (grammar: {reason})"
+            elif not replay_ok:
+                outcome = "REJECTED (dishonest: structural replay disagrees)"
+            elif verified:
+                outcome = (f"VERIFIED (leaf heldout {heldout}% >= "
+                           f"{args.min_heldout}%, structure minted, "
+                           f"+{MINT_PER_VERIFIED_CLAIM})")
+            else:
+                outcome = (f"REJECTED (honest but below quality bar: "
+                           f"heldout {heldout}% < {args.min_heldout}%)")
+            print(f"[ledger] structural claim {args.claim}: -> {outcome}")
+            return
         with tempfile.TemporaryDirectory() as td:
             blob = Path(td) / "replayed.bin"
             computed = replay_claim(claim, blob)
