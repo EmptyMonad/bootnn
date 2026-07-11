@@ -135,23 +135,37 @@ class Ledger:
         return e
 
 
-def replay_claim(claim):
+# The economy's default quality bar: an honest replay mints only if the
+# replayed artifact ALSO clears this held-out generalization threshold.
+# CRC-match proves honesty (they ran what they said); the gauntlet
+# proves worth. Reproducibility is not worthiness.
+MINT_MIN_HELDOUT = 95.0
+
+
+def replay_claim(claim, out):
     """Verification IS replay: rerun the training, CRC the artifact."""
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "replayed.bin"
-        cmd = [sys.executable, str(TRAIN),
-               "--seed", str(claim["seed"]),
-               "--epochs", str(claim["epochs"]),
-               "--lr", str(claim["lr"]),
-               "--output", str(out)]
-        print(f"[ledger] replaying: {' '.join(cmd[1:])}")
-        # train.py's exit code also gates accuracy/divergence; the ledger
-        # only asks whether the *artifact* is reproduced. The economy
-        # gates on the full gauntlet separately before a blob becomes law.
-        subprocess.run(cmd, capture_output=True, timeout=3600)
-        if not out.is_file():
-            return None
-        return crc32(out.read_bytes()) & 0xFFFFFFFF
+    cmd = [sys.executable, str(TRAIN),
+           "--seed", str(claim["seed"]),
+           "--epochs", str(claim["epochs"]),
+           "--lr", str(claim["lr"]),
+           "--output", str(out)]
+    print(f"[ledger] replaying: {' '.join(cmd[1:])}")
+    # train.py's exit code also gates accuracy/divergence; the ledger
+    # asks separately (a) is the artifact reproduced, (b) does it pass
+    # the quality gauntlet.
+    subprocess.run(cmd, capture_output=True, timeout=3600)
+    if not out.is_file():
+        return None
+    return crc32(out.read_bytes()) & 0xFFFFFFFF
+
+
+def gauntlet(blob, per_key=20):
+    """Held-out generalization of an artifact, percent. Deterministic
+    (context_eval's fixed seed), format-aware (window or v5)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from context_eval import evaluate
+    correct, total, _, _, _ = evaluate(str(blob), per_key=per_key)
+    return 100.0 * correct / total
 
 
 def main():
@@ -169,6 +183,10 @@ def main():
 
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
     p.add_argument("--claim", type=int, required=True)
+    p.add_argument("--min-heldout", type=float, default=MINT_MIN_HELDOUT,
+                   help="quality bar: honest replays mint only at or "
+                        "above this held-out accuracy (policy knob, "
+                        "recorded in the verdict)")
 
     p = sub.add_parser("transfer")
     p.add_argument("--src", required=True)
@@ -199,16 +217,35 @@ def main():
                e["data"]["claim_idx"] == args.claim:
                 sys.exit(f"ERROR: claim {args.claim} already has a "
                          f"verdict (entry {e['idx']}) - not replaying")
-        computed = replay_claim(claim)
-        verified = computed == claim["claimed_crc"]
+        with tempfile.TemporaryDirectory() as td:
+            blob = Path(td) / "replayed.bin"
+            computed = replay_claim(claim, blob)
+            replay_ok = computed == claim["claimed_crc"]
+            heldout = None
+            if replay_ok:
+                # Honest - now is it WORTH anything? Quality gauntlet on
+                # the replayed artifact (dishonest claims skip it: there
+                # is nothing of theirs to measure).
+                heldout = round(gauntlet(blob), 1)
+        verified = bool(replay_ok and heldout is not None
+                        and heldout >= args.min_heldout)
         e = led.append("verdict", {
             "claim_idx": args.claim, "verified": verified,
-            "computed_crc": computed})
+            "computed_crc": computed, "replay_ok": replay_ok,
+            "heldout": heldout, "min_heldout": args.min_heldout})
+        crc_s = f"{computed:#010x}" if computed is not None else "none"
+        if not replay_ok:
+            outcome = "REJECTED (dishonest: replay disagrees)"
+        elif verified:
+            outcome = (f"VERIFIED (heldout {heldout}% >= "
+                       f"{args.min_heldout}%, +{MINT_PER_VERIFIED_CLAIM} "
+                       f"minted)")
+        else:
+            outcome = (f"REJECTED (honest but below quality bar: "
+                       f"heldout {heldout}% < {args.min_heldout}%)")
         print(f"[ledger] claim {args.claim}: claimed "
               f"{claim['claimed_crc']:#010x}, replay produced "
-              f"{computed:#010x} -> "
-              f"{'VERIFIED (+%d minted)' % MINT_PER_VERIFIED_CLAIM
-                 if verified else 'REJECTED'}")
+              f"{crc_s} -> {outcome}")
 
     elif args.cmd == "transfer":
         led.append("transfer", {"src": args.src, "dst": args.dst,

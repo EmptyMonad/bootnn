@@ -217,10 +217,16 @@ conversation. Order is deliberate.
    (rerun `train.py`, compare CRC32), issuance is a pure function of
    the log (no mint event exists to forge), transfers append-validated
    and audit-re-derived, tampering cascades to audit failure.
-   Remaining: dataset-delta claims (train.py must accept a data
-   contribution, not just hyperparams), gauntlet gating before a
-   verified blob becomes law, ML-DSA signatures on entries, SPHINCS+
-   identities, hardware-profile reward class (portability mints).
+   ✅ **Quality-gated minting**: the verdict splits honesty from worth
+   — replay-CRC match proves the contributor ran what they said; the
+   mint additionally requires the replayed artifact to clear a
+   held-out quality bar (default 95%, an explicit policy knob recorded
+   in every verdict). Honest-but-weak work is rejected with the reason
+   on the ledger; dishonest claims never get a gauntlet run. Gated in
+   ledger_test. Remaining: dataset-delta claims (train.py must accept
+   a data contribution, not just hyperparams), ML-DSA signatures on
+   entries, SPHINCS+ identities, hardware-profile reward class
+   (portability mints).
 5. 📋 **S3 spike — two specialists + a router** (SWARM_DESIGN, S3):
    train two blobs on disjoint command subsets, host-side router,
    measure against one equal-weight generalist. Falsifies (or funds)

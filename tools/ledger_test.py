@@ -64,9 +64,23 @@ def main():
     crc = crc32(blob.read_bytes()) & 0xFFFFFFFF
     print(f"[ledger_test] alice's blob crc={crc:#010x}")
 
+    # ── honest but WEAK: replay reproduces, quality bar rejects ──────────
+    # Reproducibility is not worthiness: a 30-epoch blob is honest work
+    # and still mints nothing at the default bar.
     led(ledger, "submit", "--account", "alice", "--seed", str(SEED),
         "--epochs", str(EPOCHS), "--lr", str(LR), "--claimed-crc", hex(crc))
     out = led(ledger, "verify", "--claim", "0")
+    if "below quality bar" not in out:
+        print("[ledger_test] result: FAIL (weak claim not quality-rejected)")
+        sys.exit(1)
+    if balances(ledger).get("alice", 0) != 0:
+        print("[ledger_test] result: FAIL (weak claim minted)")
+        sys.exit(1)
+
+    # ── same work under an explicit policy bar: mints ────────────────────
+    led(ledger, "submit", "--account", "alice", "--seed", str(SEED),
+        "--epochs", str(EPOCHS), "--lr", str(LR), "--claimed-crc", hex(crc))
+    out = led(ledger, "verify", "--claim", "2", "--min-heldout", "20")
     if "VERIFIED" not in out:
         print("[ledger_test] result: FAIL (honest claim not verified)")
         sys.exit(1)
@@ -75,8 +89,8 @@ def main():
     led(ledger, "submit", "--account", "mallory", "--seed", str(SEED),
         "--epochs", str(EPOCHS), "--lr", str(LR),
         "--claimed-crc", hex(crc ^ 1))
-    out = led(ledger, "verify", "--claim", "2")
-    if "REJECTED" not in out:
+    out = led(ledger, "verify", "--claim", "4")
+    if "dishonest" not in out:
         print("[ledger_test] result: FAIL (false claim not rejected)")
         sys.exit(1)
 
@@ -96,7 +110,7 @@ def main():
         sys.exit(1)
 
     # ── no double mint ───────────────────────────────────────────────────
-    led(ledger, "verify", "--claim", "0", expect_fail=True)
+    led(ledger, "verify", "--claim", "2", expect_fail=True)
 
     # ── audit passes clean, fails tampered ───────────────────────────────
     led(ledger, "audit")
