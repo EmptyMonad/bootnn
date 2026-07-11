@@ -194,9 +194,12 @@ conversation. Order is deliberate.
    interactive law==metal 6/6 vs `SsmMachine`, boot, tick, integrity
    (payload CRC, corruption rejected), swarm 3-node, serial, client,
    format gate — all green. (c) demo: satisfied (the kernel demo
-   seeds `SsmMachine` in the differential tests). Remaining (d): fold
-   `h` into the swarm digest (`h_state` exported at 0x60000; digest
-   is still state-vector-only) and re-measure the per-tick budget.
+   seeds `SsmMachine` in the differential tests). (d) ✅ `h_crc` is in
+   the swarm digest (replication covers working memory). Tick budget:
+   **kept at 20 Hz by decision** — the v5 tick (~1M adds vs Tier 3's
+   ~1M imuls, plus no history shift) is strictly cheaper than the
+   budget it was measured for; determinism is rate-independent, so
+   raising the rate is deferred until something needs it.
 3. ✅ **S1 v1 — versioned wire framing**: every event on COM1 is
    `[0xD1][event byte]` — the version byte doubles as the frame
    marker (above the ASCII event range, so desynced or unframed

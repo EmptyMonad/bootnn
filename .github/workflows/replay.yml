@@ -1,0 +1,39 @@
+name: DNOS training replay
+
+# Verification IS deterministic replay (docs/SWARM_DESIGN.md, S2) -
+# applied to our own canonical law. Retrains the v5 blob from seed
+# 1337 and requires the committed artifact byte-for-byte. Runs weekly
+# and on demand rather than per-push: the per-push CI verifies the
+# pinned CRC; this workflow proves the pin is honest.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"   # Mondays 04:00 UTC
+
+jobs:
+  replay-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-numpy
+
+      - name: Replay canonical training (seed 1337, 10k epochs)
+        run: python3 tools/ssm_lab.py --epochs 10000 --save replayed.bin
+
+      - name: Committed blob must be the replay, byte for byte
+        run: |
+          python3 - <<'EOF'
+          import sys
+          from pathlib import Path
+          a = Path("weights_ssm.bin").read_bytes()
+          b = Path("replayed.bin").read_bytes()
+          print(f"committed {len(a)} B, replayed {len(b)} B, "
+                f"{'IDENTICAL' if a == b else 'DIVERGED'}")
+          sys.exit(0 if a == b else 1)
+          EOF

@@ -1,15 +1,21 @@
 name: DNOS CI
 
-# Build the canon end-to-end on every push / PR:
-#   1. train + validate  (Python <-> assembly Q8.8 agreement, exits non-zero on divergence)
-#   2. build             (assemble dnos.asm, patch weights, pad image)
-#   3. boot test         (headless QEMU: reach PM/VESA without a triple fault)
+# The v5-era gauntlet. The canonical law (weights_ssm.bin, committed)
+# is verified by CRC on every push and by FULL TRAINING REPLAY in the
+# scheduled/manual `replay` workflow - the S2 principle applied to our
+# own CI: pin the artifact, verify cheaply always, replay-verify
+# periodically. Every behavioral gate below runs on every push.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+env:
+  # Pinned canonical v5 law (whole-file CRC32). Changing the law means
+  # changing this constant in the same commit - deliberately loud.
+  CANONICAL_V5_CRC: "0x93e6386f"
 
 jobs:
   build-and-boot:
@@ -22,40 +28,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nasm qemu-system-x86 python3-numpy
 
-      - name: Train + validate (Python <-> assembly agreement)
-        run: python3 tools/train.py
+      - name: Verify canonical v5 blob (CRC pin)
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          from zlib import crc32
+          from pathlib import Path
+          got = crc32(Path("weights_ssm.bin").read_bytes()) & 0xFFFFFFFF
+          want = int(os.environ["CANONICAL_V5_CRC"], 0)
+          print(f"blob crc {got:#010x}, pinned {want:#010x}")
+          sys.exit(0 if got == want else 1)
+          EOF
 
-      - name: Context-generalization eval (held-out random histories)
-        run: python3 tools/context_eval.py --min-accuracy 95
-
-      - name: Ternary format gate (Tier 4a law - bit-exact, self-rejecting)
+      - name: Ternary format gate (v4a/v4b/v5 - bit-exact, self-rejecting)
         run: python3 tools/ternary_format_test.py
 
-      - name: Build image (assemble + patch weights + pad)
+      - name: Held-out generalization gate (v5 law, wide alphabet)
+        run: python3 tools/context_eval.py --weights weights_ssm.bin --min-accuracy 95
+
+      - name: Build image (assemble + patch committed blob + pad)
         run: python3 tools/build.py
 
       - name: Headless boot test (PM + VESA, no triple fault)
         run: python3 tools/boot_test.py --seconds 8
 
-      - name: Interactive differential test (law vs metal over QMP keystrokes)
+      - name: Interactive differential test (law vs metal, stateful)
         run: python3 tools/interactive_test.py
 
-      - name: Weight-integrity test (pristine validates, corrupted is rejected)
+      - name: Weight-integrity test (payload CRC, corruption rejected)
         run: python3 tools/integrity_test.py
 
       - name: Deterministic-loop test (step_count <= tick_count, burst drain)
         run: python3 tools/tick_test.py
 
-      - name: Swarm replication test (S0 - N nodes, one log, one state)
+      - name: Swarm replication test (S0 - one log, one state, h included)
         run: python3 tools/swarm_test.py --nodes 3
 
-      - name: Serial differential test (S1 - keyboard and wire are one interface)
+      - name: Serial differential test (S1 v1 framing, keyboard == wire)
         run: python3 tools/serial_test.py
 
-      - name: Client record/replay test (S1 - the log IS the session)
+      - name: Client record/replay test (the log IS the session)
         run: python3 tools/client_test.py
 
-      - name: Ledger test (S2 - mint on verified replay, tamper-evident history)
+      - name: Ledger test (S2 - mint on verified replay)
         run: python3 tools/ledger_test.py
 
       - name: Rust determinism layers (IAL + NDAL)

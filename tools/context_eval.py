@@ -49,11 +49,70 @@ HISTORY_ALPHABET = [ord(c) for c in
                     string.ascii_lowercase + string.digits + " .,-+|"]
 
 
+def _is_v5(weights_file):
+    with open(weights_file, 'rb') as f:
+        return f.read(3)[2] == 5
+
+
+def _v5_batch_logits(weights_file, seqs):
+    """Vectorized v5 law over left-zero-padded sequences (exact: zero
+    drive on zero state is identity). Same arithmetic as SsmMachine,
+    batched — the per-tick readout is skipped because only the final
+    output is compared."""
+    from train import SsmMachine
+    m = SsmMachine(weights_file)
+    win, w1, w2, w3 = m.mats
+    k_in, k1, k2, k3 = m.shifts
+    L = CONTEXT_EVENTS
+    B = len(seqs)
+    X = np.zeros((B, L, 8), dtype=np.int64)
+    for b, keys in enumerate(seqs):
+        keys = keys[-L:]
+        for t, k in enumerate(keys):
+            X[b, L - len(keys) + t] = [(k >> i) & 1 for i in range(8)]
+    X *= 256
+    h = np.zeros((B, m.H), dtype=np.int64)
+    for t in range(L):
+        hl = h - (h >> m.d)
+        h = np.clip(hl + ((X[:, t] @ win) >> k_in), -32768, 32767)
+    z1 = np.clip((h @ w1) >> k1, 0, 32767)
+    z2 = np.clip((z1 @ w2) >> k2, 0, 32767)
+    acc = (z2 @ w3) >> k3
+    return np.where(acc < -8192, 0,
+                    np.where(acc > 8192, 32767, (acc + 8192) * 2))
+
+
 def evaluate(weights_file, per_key=50, rng=None):
     rng = rng or np.random.default_rng(EVAL_SEED)
     per_cmd_hits = {}
     per_cmd_total = {}
     confusions = {}
+    v5 = _is_v5(weights_file)
+
+    if v5:
+        # Sequences in typing order (oldest first), trigger key last.
+        seqs, expected_all, names = [], [], []
+        for key, cmd_name in sorted(SINGLE_KEYS.items()):
+            for _ in range(per_key):
+                hist_len = int(rng.integers(0, CONTEXT_EVENTS))
+                hist = [int(rng.choice(HISTORY_ALPHABET))
+                        for _ in range(hist_len)]
+                seqs.append(hist + [ord(key)])
+                expected_all.append(CMD[cmd_name])
+                names.append(cmd_name)
+        out = _v5_batch_logits(weights_file, seqs)
+        got_all = np.argmax(out[:, :20], axis=1)
+        for cmd_name, exp, got in zip(names, expected_all, got_all):
+            per_cmd_total[cmd_name] = per_cmd_total.get(cmd_name, 0) + 1
+            if got == exp:
+                per_cmd_hits[cmd_name] = per_cmd_hits.get(cmd_name, 0) + 1
+            else:
+                per_cmd_hits.setdefault(cmd_name, 0)
+                pair = (cmd_name, CMD_NAMES[int(got)])
+                confusions[pair] = confusions.get(pair, 0) + 1
+        total = sum(per_cmd_total.values())
+        correct = sum(per_cmd_hits.values())
+        return correct, total, per_cmd_hits, per_cmd_total, confusions
 
     for key, cmd_name in sorted(SINGLE_KEYS.items()):
         expected = CMD[cmd_name]
