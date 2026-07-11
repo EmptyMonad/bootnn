@@ -113,7 +113,12 @@ def encode(data):
 
 
 class SsmLab:
-    def __init__(self, h=512, thresh=0.75, seed=1337):
+    def __init__(self, h=512, thresh=0.75, seed=1337, r1=1024, r2=384):
+        # Readout widths r1/r2 are instance parameters: the v5 format
+        # reads topology from the header and SsmMachine follows it, so
+        # equal-total-params comparisons can size the readout, not
+        # just h. Defaults preserve the canonical rng draw order
+        # exactly (same shapes, same draws).
         rng = np.random.RandomState(seed)
         self.H = h
         # Structural decay spectrum: 8 log-spaced horizons, equal blocks.
@@ -121,9 +126,9 @@ class SsmLab:
         self.lam = (1.0 - 2.0 ** -self.d).astype(np.float64)
         self.thresh = thresh
         self.win = rng.randn(FEAT, h) * np.sqrt(2.0 / FEAT) * 0.5
-        self.w1 = rng.randn(h, 1024) * np.sqrt(2.0 / h) * 0.5
-        self.w2 = rng.randn(1024, 384) * np.sqrt(2.0 / 1024) * 0.5
-        self.w3 = rng.randn(384, OUT) * np.sqrt(2.0 / 384) * 0.5
+        self.w1 = rng.randn(h, r1) * np.sqrt(2.0 / h) * 0.5
+        self.w2 = rng.randn(r1, r2) * np.sqrt(2.0 / r1) * 0.5
+        self.w3 = rng.randn(r2, OUT) * np.sqrt(2.0 / r2) * 0.5
         self._frozen = None
 
     def _proj(self, w, i):

@@ -85,6 +85,24 @@ def main():
     if not ok:
         failures.append("v5: SsmMachine diverges from the lab law")
 
+    # v5 with a NONSTANDARD readout (topology from the header, not the
+    # code): the format must carry any (r1, r2), bit-exactly.
+    np.random.seed(1234)
+    lab_n = SsmLab(h=512, r1=608, r2=232)
+    lab_n.save(str(tmp / "v5_wide.bin"))
+    machine_n = SsmMachine(str(tmp / "v5_wide.bin"))
+    z3n = lab_n.int_logits(Xs)
+    mem_n = np.where(z3n < -8192, 0,
+                     np.where(z3n > 8192, 32767, (z3n + 8192) * 2))
+    ok = all(np.array_equal(
+        np.asarray(machine_n.run(keys), dtype=np.int64),
+        mem_n[i].astype(np.int64)) for i, (keys, _, _) in enumerate(seqs))
+    print(f"[ternary_format] v5 recurrent (512ch, readout 608/232): "
+          f"{'BIT-EXACT' if ok else 'DIVERGED'} "
+          f"({len(seqs)} sequences, SsmMachine vs lab law)")
+    if not ok:
+        failures.append("v5 nonstandard readout: SsmMachine diverges")
+
     # Reserved code 10: inject into the first weight byte and expect
     # refusal before inference.
     blob = bytearray((tmp / "canonical.bin").read_bytes())
