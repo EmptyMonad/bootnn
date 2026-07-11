@@ -73,7 +73,7 @@ jobs:
       - name: Ledger test (S2 - mint on verified replay)
         run: python3 tools/ledger_test.py
 
-      - name: Authorship test (optional HBSS identity, reward identity-blind)
+      - name: Authorship test (persistent Merkle-Lamport identity, reward identity-blind)
         run: python3 tools/authorship_test.py
 
       - name: Forest structure gate (S3 - hard routing, bit-exact views)

@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-Authorship gate: identity is optional, and optional stays optional
-under economic pressure.
+Authorship gate: identity is optional, persistent, and optional stays
+optional under economic pressure.
 
   1. HBSS round trip: a Lamport signature verifies; any bit flipped in
      the message or the signature fails; the SSID self-certifies.
-  2. ECONOMIC NEUTRALITY (the invariant): the same work minted with an
+  2. MERKLE round trip: one SSID (a Merkle root of one-time leaves)
+     signs many messages; a tampered auth path or a wrong leaf index
+     fails to certify.
+  3. ECONOMIC NEUTRALITY (the invariant): the same work minted with an
      authorship signature and minted anonymously produce byte-identical
      verdict data and the identical mint. Reward is gated by gauntlet
      alone - never by identity.
-  3. INTEGRITY: a tampered authorship envelope fails audit; a claim
+  4. PERSISTENCE: several ledger entries signed from one seed share one
+     SSID with distinct leaves and audit clean; the legacy one-time
+     envelope still audits clean as the empty-path degenerate.
+  5. ONE-TIME-NESS IS LOG-ENFORCED: a leaf that signs two entries fails
+     audit; an exhausted identity refuses to append rather than reuse.
+  6. INTEGRITY: a tampered authorship envelope fails audit; a claim
      with no envelope audits clean (anonymous is first-class).
-  4. REGISTRY-FREE: verification consults nothing but the entry.
+  7. REGISTRY-FREE: verification consults nothing but the entry.
 
 Uses a trivial fake gauntlet so the test is fast and about authorship,
 not training.
@@ -39,6 +47,29 @@ def hbss_roundtrip():
     assert not hbss.verify(pkh, msg, bad), "tampered sig verified"
     assert hbss.ssid(pk) == hbss.ssid_of_hex(pkh), "ssid not self-consistent"
     print("[authorship] HBSS: sign/verify/tamper/ssid OK")
+
+
+def merkle_roundtrip():
+    ident = hbss.MerkleIdentity("dana-key")
+    envs = [ident.envelope(f"entry hash {i}", i) for i in (0, 3, 7)]
+    for i, env in zip((0, 3, 7), envs):
+        assert hbss.verify(env["pubkey"], f"entry hash {i}", env["sig"]), \
+            f"leaf {i} sig rejected"
+        assert hbss.certify(env), f"leaf {i} does not certify"
+    assert len({env["ssid"] for env in envs}) == 1, \
+        "leaves of one identity produced different SSIDs"
+    assert len({env["pubkey"] for env in envs}) == 3, \
+        "distinct leaves shared a pubkey"
+    # Tampered auth path: valid signature, wrong membership proof.
+    bad = dict(envs[0], path=list(envs[0]["path"]))
+    p0 = bad["path"][0]
+    bad["path"][0] = ("0" if p0[0] != "0" else "1") + p0[1:]
+    assert not hbss.certify(bad), "tampered auth path certified"
+    # Wrong leaf index: flips left/right folds, root must mismatch.
+    assert not hbss.certify(dict(envs[0], leaf=1)), \
+        "wrong leaf index certified"
+    print("[authorship] Merkle: one SSID, many leaves; bad path and bad "
+          "index refused")
 
 
 def _mint_one(tmp, name, author_seed):
@@ -70,15 +101,88 @@ def neutrality(tmp):
         assert v_anon[k] == v_signed[k], f"verdict field {k} differs"
     assert bal_anon == bal_signed == ledger.MINT_PER_VERIFIED_CLAIM, \
         f"mint differs: anon={bal_anon} signed={bal_signed}"
-    # The signed claim carries a self-certifying author; the anon one
-    # carries none - and both minted the same.
+    # The signed claim carries a self-certifying persistent author; the
+    # anon one carries none - and both minted the same.
     signed_claim = led.entries[0]
     assert "author" in signed_claim and \
-        hbss.ssid_of_hex(signed_claim["author"]["pubkey"]) == \
-        signed_claim["author"]["ssid"]
+        hbss.certify(signed_claim["author"]) and \
+        signed_claim["author"]["path"], "signed claim not Merkle-certified"
     print(f"[authorship] neutrality: anon and signed both mint "
           f"{bal_anon}; verdict bytes identical - reward is "
           f"identity-blind")
+
+
+def persistence(tmp):
+    path = Path(tmp) / "persist.jsonl"
+    led = ledger.Ledger(path)
+    for i in range(3):
+        led.append("claim", {"account": "erin", "seed": i, "epochs": 1,
+                             "lr": 0.02, "claimed_crc": i},
+                   author_seed="erin-seed")
+    _, errors = led.fold()
+    assert not errors, f"persistent identity fails audit: {errors}"
+    envs = [e["author"] for e in led.entries]
+    assert len({env["ssid"] for env in envs}) == 1, \
+        "one seed produced multiple SSIDs"
+    assert [env["leaf"] for env in envs] == [0, 1, 2], \
+        "leaves not spent in order"
+    # Legacy one-time envelope = the empty-path degenerate: attach an
+    # old-format signature to a fresh anonymous entry (the envelope
+    # sits outside the hashed body, so the chain is untouched) and the
+    # new verifier must accept it unchanged.
+    led2 = ledger.Ledger(Path(tmp) / "legacy.jsonl")
+    e = led2.append("claim", {"account": "old", "seed": 9, "epochs": 1,
+                              "lr": 0.02, "claimed_crc": 9})
+    sk, pk = hbss.keypair("legacy-seed")
+    raw = json.loads(led2.path.read_text().splitlines()[0])
+    raw["author"] = {"ssid": hbss.ssid(pk), "pubkey": hbss.pk_hex(pk),
+                     "sig": hbss.sign(sk, e["hash"])}
+    led2.path.write_text(json.dumps(raw, sort_keys=True,
+                                    separators=(",", ":")) + "\n")
+    _, errors = ledger.Ledger(led2.path).fold()
+    assert not errors, f"legacy one-time envelope fails audit: {errors}"
+    print("[authorship] persistence: 3 entries, one SSID, leaves 0/1/2, "
+          "audit clean; legacy envelope still verifies")
+
+
+def one_time_enforced(tmp):
+    # Leaf reuse: sign two entries with the SAME leaf (bypassing
+    # append's spent-leaf scan by attaching envelopes post-hoc - valid
+    # signatures, valid membership, but the leaf is spent twice).
+    path = Path(tmp) / "reuse.jsonl"
+    led = ledger.Ledger(path)
+    for i in range(2):
+        led.append("claim", {"account": "mallory", "seed": i, "epochs": 1,
+                             "lr": 0.02, "claimed_crc": i})
+    ident = hbss.MerkleIdentity("mallory-seed")
+    lines = []
+    for ln in led.path.read_text().splitlines():
+        e = json.loads(ln)
+        e["author"] = ident.envelope(e["hash"], 0)
+        lines.append(json.dumps(e, sort_keys=True, separators=(",", ":")))
+    led.path.write_text("\n".join(lines) + "\n")
+    _, errors = ledger.Ledger(path).fold()
+    assert any("reused" in x for x in errors), \
+        "a leaf signed two entries and audit stayed clean"
+    # Exhaustion: after 2^depth signed appends the identity must refuse
+    # rather than silently reuse a leaf.
+    led3 = ledger.Ledger(Path(tmp) / "exhaust.jsonl")
+    n = 1 << hbss.IDENT_DEPTH
+    for i in range(n):
+        led3.append("claim", {"account": "frank", "seed": i, "epochs": 1,
+                              "lr": 0.02, "claimed_crc": i},
+                    author_seed="frank-seed")
+    try:
+        led3.append("claim", {"account": "frank", "seed": n, "epochs": 1,
+                              "lr": 0.02, "claimed_crc": n},
+                    author_seed="frank-seed")
+        raise AssertionError("exhausted identity appended a 9th signature")
+    except SystemExit as ex:
+        assert "exhausted" in str(ex), f"wrong refusal: {ex}"
+    _, errors = led3.fold()
+    assert not errors, f"exhausted-but-honest ledger fails audit: {errors}"
+    print(f"[authorship] one-time enforced: leaf reuse fails audit; "
+          f"leaf {n+1} of {n} refused loudly")
 
 
 def integrity(tmp):
@@ -100,10 +204,13 @@ def integrity(tmp):
 def main():
     tmp = tempfile.mkdtemp()
     hbss_roundtrip()
+    merkle_roundtrip()
     neutrality(tmp)
+    persistence(tmp)
+    one_time_enforced(tmp)
     integrity(tmp)
-    print("[authorship] result: PASS - identity is optional, unforgeable "
-          "when present, and never buys a mint")
+    print("[authorship] result: PASS - identity is optional, persistent, "
+          "unforgeable when present, and never buys a mint")
 
 
 if __name__ == "__main__":

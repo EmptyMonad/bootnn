@@ -241,10 +241,22 @@ conversation. Order is deliberate.
    The fold verifies a present envelope (a forgery fails audit) but the
    mint reads only `verified` (= replay_ok ∧ gauntlet) — proven by
    `authorship_test`: anon and signed mint byte-identically. Optional
-   stays optional under economic pressure. Deferred within this: a
-   persistent multi-signature identity (Merkle tree of HBSS leaves) —
-   the one-time keys are per-entry today. Remaining S2: hardware-
-   profile reward class (portability mints).
+   stays optional under economic pressure.
+   ✅ **Persistent identity (2026-07-11)**: one SSID signs many
+   entries — a Merkle tree of 2^depth one-time HBSS leaves
+   (`hbss.MerkleIdentity`); the SSID is the root, each envelope
+   proves leaf membership by authentication path, and the legacy
+   per-entry envelope verifies unchanged as the empty-path degenerate
+   (root of one leaf = hash(pubkey), which IS the old SSID — no
+   format break). Leaf/node domain separation is by construction:
+   a leaf preimage is a 16 KB pubkey, an internal preimage 64 bytes.
+   Still registry-free and reward-neutral; one-time-ness is now
+   enforced by the log rather than signer discipline (a leaf signing
+   two entries fails audit; an exhausted identity refuses to append
+   rather than reuse — both negative-tested). The signer is
+   stateless: the seed recreates the tree, the ledger records which
+   leaves are spent. Remaining S2: hardware-profile reward class
+   (portability mints).
 5. ✅ **S3 spike — branching-leaf specialists, structure-first**
    (`tools/s3_forest.py`): two 512-ch v5 leaves behind a hard static
    router (total function key→leaf; no blending, no parameters; the

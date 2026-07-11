@@ -72,9 +72,10 @@ class Ledger:
 
         Authorship anchors to THIS log: precedence is append order, and
         integrity is the hash chain below - identity-free by default. An
-        optional `author` envelope (hash-based one-time signature over
-        the entry body) rides alongside; when present it is verified for
-        integrity, but it NEVER gates reward. The mint reads only
+        optional `author` envelope (hash-based signature under a
+        persistent Merkle-Lamport identity; the legacy one-time envelope
+        is its empty-path degenerate) rides alongside; when present it
+        is verified for integrity, but it NEVER gates reward. The mint reads only
         `verdict.verified` (= replay_ok AND gauntlet) - so an anonymous
         claim and a signed one mint identically, and optional stays
         optional under economic pressure."""
@@ -82,6 +83,7 @@ class Ledger:
         errors = []
         claims = {}
         verdicted = set()
+        leaves_spent = set()
         prev = GENESIS
         for e in self.entries:
             if e["prev"] != prev or \
@@ -93,15 +95,26 @@ class Ledger:
             # Optional authorship proof: registry-free, provable without
             # lookup. Absent -> anonymous (no error). Present -> must
             # verify against the entry hash and its own embedded pubkey,
-            # and its ssid must self-certify. A forged/tampered envelope
-            # is an integrity error, not a reward event.
+            # and its ssid must certify (Merkle leaf->root fold; the
+            # legacy one-time envelope is the empty-path degenerate).
+            # A forged/tampered envelope is an integrity error, not a
+            # reward event. One-time-ness is enforced by the log, not
+            # by signer discipline: a leaf that signs two entries has
+            # revealed too many preimages, so reuse fails audit.
             author = e.get("author")
             if author is not None:
-                from hbss import ssid_of_hex, verify
+                from hbss import certify, verify
                 if not verify(author["pubkey"], e["hash"], author["sig"]):
                     errors.append(f"entry {e['idx']}: author signature invalid")
-                elif ssid_of_hex(author["pubkey"]) != author["ssid"]:
+                elif not certify(author):
                     errors.append(f"entry {e['idx']}: ssid does not certify")
+                else:
+                    lk = (author["ssid"], author.get("leaf", 0))
+                    if lk in leaves_spent:
+                        errors.append(f"entry {e['idx']}: one-time leaf "
+                                      f"{lk[1]} of ssid {lk[0][:12]}... "
+                                      f"reused")
+                    leaves_spent.add(lk)
             d = e["data"]
             if e["type"] == "claim":
                 claims[e["idx"]] = d
@@ -155,11 +168,23 @@ class Ledger:
         # idx+prev+type+data), so the signature covers position and
         # content but sits OUTSIDE the hashed body - it cannot perturb
         # the chain, and anonymous vs signed produce the same chain.
+        # The seed derives a persistent Merkle identity (one SSID,
+        # 2^depth one-time leaves); the signer is stateless - which
+        # leaves are spent is read back from this log, and exhaustion
+        # refuses loudly rather than ever reusing a leaf.
         if author_seed is not None:
-            from hbss import keypair, pk_hex, sign, ssid
-            sk, pk = keypair(author_seed)
-            e["author"] = {"ssid": ssid(pk), "pubkey": pk_hex(pk),
-                           "sig": sign(sk, h)}
+            from hbss import MerkleIdentity
+            ident = MerkleIdentity(author_seed)
+            spent = {a.get("leaf", 0) for x in self.entries
+                     for a in (x.get("author"),)
+                     if a and a["ssid"] == ident.ssid}
+            free = next((i for i in range(ident.n_leaves)
+                         if i not in spent), None)
+            if free is None:
+                sys.exit(f"ERROR: identity {ident.ssid[:12]}... exhausted "
+                         f"- all {ident.n_leaves} one-time leaves spent on "
+                         f"this ledger; derive a new identity")
+            e["author"] = ident.envelope(h, free)
         self.entries.append(e)
         with self.path.open("a") as f:
             f.write(canonical(e) + "\n")
@@ -264,8 +289,9 @@ def main():
                         "the claim so replay is fully determined by the log")
     p.add_argument("--author-seed",
                    help="optional self-sovereign authorship: sign the "
-                        "claim with a hash-based one-time key derived "
-                        "from this seed (registry-free; never gates "
+                        "claim with a persistent Merkle-Lamport identity "
+                        "derived from this seed - one SSID, many entries, "
+                        "each leaf one-time (registry-free; never gates "
                         "reward)")
 
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
