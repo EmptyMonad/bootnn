@@ -410,11 +410,16 @@ conversation. Order is deliberate.
    is optimizer-invariant — which is what the plateau's invariance
    had been saying all along. Re-sizing shifts to typical magnitudes
    broke the wall (15% → 23.8%, loss monotone through the old
-   floor). Still open: rate — integer 23.8% vs control ~60% at
-   matched epochs; next levers in suspected order: extra fractional
-   bits through the remaining >>8 hop, RMS second moment via exact
-   isqrt, weight-decay-as-shift so the faster norm-proportional step
-   can run without its measured ~1k-epoch divergence.
+   floor). Third campaign (2026-07-13): RMS second moment via
+   integer Newton isqrt produced the first control-like
+   margin-satisfaction structure (violations below the eternal 105);
+   weight decay slows but does not stop the norm-feedback
+   divergence. Still open after three campaigns: STABILITY — integer
+   best 23.8% vs control ~60%; the recurring failure is the
+   norm/step feedback loop, and the named re-derivations (not knobs)
+   are integer layer-norm to pin the law's scale, a fixed absolute
+   step in law units, or an integer-softmax loss. Two overflow traps
+   are ledgered in the lab docstring for whoever continues.
 
 ## Completed backlog (Tier 2/3 era)
 

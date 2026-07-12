@@ -68,12 +68,28 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   step (norm growth is part of how the ternary law finds its scale)
   but feeds back into divergence after ~1k epochs; best-checkpoint
   selection preserves the peak through it.
-  OPEN: rate. Integer best 23.8% vs float control ~60% at comparable
-  epochs - remaining levers, in suspected order: carry extra
-  fractional bits through the dz1 >>8 hop (signal precision, the
-  proven lever's continuation); RMS second moment via exact isqrt
-  (m/EMA|g| under-damps spiky weights); norm control (weight decay as
-  a shift) to let the fast proportional step run without divergence.
+  THIRD CAMPAIGN (2026-07-13): the precision lever was re-derived as
+  stale (post-fix magnitudes through the >>8 hop are ~2^21 typical -
+  healthy), so the second-moment and norm levers were run instead.
+  RMS via integer Newton isqrt (int_isqrt, bit-exact, committed)
+  produced the first sub-105 violation counts in the lab's history
+  (82-91: margins actually being satisfied, the float control's
+  signature) at 18.4%/800ep. Overflow trap #2 for the ledger:
+  weight-level gradients reach ~2^36, and an unclipped (g>>4)^2
+  wraps int64 - u goes negative, isqrt degenerates, weights explode
+  into frozen saturation; clip-before-square is mandatory. Weight
+  decay as a shift (2^-11/step) slows but does not stop the
+  norm-feedback divergence (peak 21.8%, then decay; --wd-shift, off
+  by default).
+  OPEN after three campaigns: STABILITY, now ranked above precision.
+  Integer best 23.8% (norm-proportional sign-SGD, best-checkpoint
+  selection) vs float control ~60%. The recurring failure is the
+  norm/step feedback loop; candidate re-derivations rather than
+  knobs: normalize activations (integer layer-norm via shift) so the
+  law's scale is pinned instead of drifting, or a fixed absolute
+  step in law units (decouple step from mean|w| entirely, schedule
+  it like the shifts). An integer softmax (fixed-point exp table)
+  remains the loss-side unknown.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -100,7 +116,9 @@ N_CMD = 20
 MARGIN = 1024               # hinge margin, in pre-sigmoid acc units
 MU_S = 3                    # momentum = 1 - 2^-3 = 0.875, as a shift
 A_S1 = 3                    # adam: first-moment EMA shift (beta1 ~ 0.875)
-A_S2 = 6                    # adam: |g|-moment EMA shift (beta2 ~ 0.984)
+A_S2 = 8                    # adam: 2nd-moment EMA shift (beta2 ~ 0.996)
+A_GQ = 4                    # pre-shift before squaring (int64 headroom)
+
 FREEZE = 200                # epochs before per-layer shifts freeze
 MASK64 = (1 << 64) - 1
 
@@ -152,6 +170,24 @@ def encode(data):
     return X * 256, cls
 
 
+def int_isqrt(v):
+    """Vectorized integer square root: binary bit-length seed + Newton
+    iterations, int64 ops and exact integer division only - bit-exact
+    on every platform. Converges quadratically; 6 iterations cover
+    64-bit inputs."""
+    bl = np.zeros_like(v)
+    t = np.maximum(v, 0)
+    for s in (32, 16, 8, 4, 2, 1):
+        big = t >= (np.int64(1) << s)
+        bl += np.where(big, s, 0)
+        t = np.where(big, t >> s, t)
+    bl += (t > 0)
+    x = np.int64(1) << ((bl + 1) >> 1)
+    for _ in range(6):
+        x = (x + v // np.maximum(x, 1)) >> 1
+    return np.maximum(x, 1)
+
+
 def _round_log2(x):
     """round(log2(x)) for a positive int, exactly: bit_length gives
     floor; round up iff x^2 >= 2^(2b+1) (i.e. x >= 2^b * sqrt(2))."""
@@ -195,6 +231,7 @@ class IntLab:
         self.step0 = [int(np.abs(w).sum()) // w.size for w in self.w]
         self.frozen = None
         self.opt = "sign"
+        self.wd = 0
 
     def project(self):
         outs = [int_project(w, None if self.frozen is None
@@ -326,8 +363,15 @@ class IntLab:
                 zip(self.w, self.v, self.u, self.r, grads)):
             m -= m >> A_S1
             m += g >> A_S1
+            # True RMS second moment (integer Newton isqrt): EMA|g|
+            # under-damps spiky weights. Pre-shift AND clip before
+            # squaring: weight-level gradients reach ~2^36, and an
+            # unclipped square wraps int64 (measured: u went negative,
+            # isqrt degenerated, weights exploded to saturation). A
+            # clipped monster just saturates its own damping.
+            gq = np.clip(g >> A_GQ, -(1 << 28), 1 << 28)
             u -= u >> A_S2
-            u += np.abs(g) >> A_S2
+            u += (gq * gq) >> A_S2
             # Step tracks the live mean|w| (measured to climb ~50%
             # faster than an init-frozen step: norm growth is part of
             # how the ternary law finds its scale) - but unchecked it
@@ -342,11 +386,18 @@ class IntLab:
             # vanish and most weights starve (measured: the float
             # control converges on this same harness, the quantized
             # step does not).
+            denom = int_isqrt(u) << A_GQ
             r += np.sign(m) * (((np.abs(m) * step_q) << 8)
-                               // np.maximum(u, 1))
+                               // np.maximum(denom, 1))
             emit = np.sign(r) * (np.abs(r) >> 8)
             r -= emit << 8
             w -= emit
+            # Weight decay as a shift (integer L2), opt-in: at 2^-11
+            # it slows but does not stop the norm-feedback divergence
+            # (measured: peak 21.8% then decay) - kept as a lever, off
+            # by default.
+            if self.wd:
+                w -= np.sign(w) * (np.abs(w) >> self.wd)
 
     def accuracy(self, X, cls, signs, ks):
         acc, _ = self.forward(X, signs, ks)
@@ -465,6 +516,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
     ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
+    ap.add_argument("--wd-shift", type=int, default=0,
+                    help="weight decay as w -= |w|>>shift per step; 0=off")
     ap.add_argument("--save")
     args = ap.parse_args()
     if args.gate:
@@ -472,6 +525,7 @@ def main():
         return
     lab = IntLab(h=args.h, r1=args.r1, r2=args.r2, seed=args.seed)
     lab.opt = args.opt
+    lab.wd = args.wd_shift
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
