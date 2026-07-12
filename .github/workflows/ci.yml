@@ -89,6 +89,9 @@ jobs:
       - name: Portability gate (S2 - substrate coverage mints once per pair)
         run: python3 tools/portability_test.py
 
+      - name: Integer-training order gate (gradients are order-free by construction)
+        run: python3 tools/int_train_lab.py --gate
+
       - name: Intent compiler gate (config is law, conversation is ephemeral)
         run: python3 tools/intent_test.py
 

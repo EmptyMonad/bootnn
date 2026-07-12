@@ -381,10 +381,26 @@ conversation. Order is deliberate.
 9. 🔬 **Integer-exact training** (decade view; research) — inference
    is portable by construction, training still pins the verifier to a
    BLAS via float BPTT. Retiring that float dependency would make S2
-   replay-verification environment-free end to end. Start with a lab
-   (fixed-point or integer-SGD shadow on the v5 law) and a
-   falsifiable target: one canonical CRC reproduced across two
-   distinct BLAS environments where the float trainer differs.
+   replay-verification environment-free end to end.
+   🚧 **Lab landed (2026-07-12, `tools/int_train_lab.py`, gates in
+   CI).** First campaign's ledger: the ORDER-FREEDOM half of the
+   thesis is PROVEN and gated — integer gradients are bit-identical
+   under batch permutation and chunked accumulation (float64's
+   non-associativity shown alongside; the BLAS-variance mechanism is
+   absent by construction, xorshift data sampling included, so
+   training is a pure function of the seed). Design findings, each
+   forced by measurement: training through the law's own truncation
+   grid cannot bootstrap (init logits ±1 — hence an integer shadow
+   with deferred shifts, law-forward gated bit-exact against
+   SsmMachine for selection); integer LARS floor-division zeroes
+   sub-peak updates (use sign-SGD); range shifts must be per-sample
+   or batch linearity silently breaks (now a gate). OPEN: convergence
+   — sign-SGD + Weston-Watkins hinge learns (loss −50%) but plateaus
+   at ~3× chance, invariant to width, step size, schedule, and loss
+   density, so the float trainer's remaining edge is optimizer
+   ADAPTIVITY, not float arithmetic. Next lever, not yet run:
+   integer Adam (exact isqrt; per-weight shift scaling from
+   bit_length) or integer softmax via fixed-point exp table.
 
 ## Completed backlog (Tier 2/3 era)
 
