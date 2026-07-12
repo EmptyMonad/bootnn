@@ -70,6 +70,9 @@ jobs:
       - name: Client record/replay test (the log IS the session)
         run: python3 tools/client_test.py
 
+      - name: Wire-frame differential (Rust encoder == Python authority)
+        run: python3 tools/frame_test.py
+
       - name: Ledger test (S2 - mint on verified replay)
         run: python3 tools/ledger_test.py
 

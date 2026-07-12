@@ -207,8 +207,12 @@ conversation. Order is deliberate.
    The ring still carries bare events: framing is a wire concern.
    `dnos_client.frame()` is the single wire-protocol authority;
    serial_test gates the negative (unframed byte → counted bad, node
-   state bit-unchanged, h included). Remaining niche: the Rust IAL
-   crate should emit frames too (cargo still untested anywhere).
+   state bit-unchanged, h included).
+   ✅ **Rust emitter (2026-07-12)**: `dnos_ial::wire::frame` is a
+   second, independent implementation of the v1 frame;
+   `tools/frame_test.py` (in CI) asserts byte-parity with the
+   authority on all 256 events — protocol agreement is tested, never
+   assumed, the same discipline as law==metal.
    Swarm digests now include **h_crc** — replication covers working
    memory itself, not just observable outputs.
 4. 🚧 **S2 — contribution log + mint prototype**: core **landed**
@@ -334,6 +338,25 @@ conversation. Order is deliberate.
    provision. Original vision (NL interview host-side) unchanged: NL
    interview → canonical config event log → deterministic client/shell
    configuration; the conversation is ephemeral, the log is law.
+7. 📋 **S2 hardware-profile reward class (portability mints)** — the
+   last named S2 remainder. Sketch: a portability claim is
+   (artifact_crc, profile_id, probe event log, claimed trajectory
+   digest); verification replays the probe log on the named profile
+   and compares digests (QEMU-TCG-x86 is profile 0 — the harness
+   generalizes interactive_test's QMP differential); the fold mints
+   once per (artifact, profile) pair, uniqueness enforced like double
+   verdicts. Do the pre-code analysis in a QEMU-capable session — the
+   gate cannot be developed blind.
+8. 📋 **RISC-V second hardware profile** (decade view) — what makes
+   the portability mint real rather than reflexive: the same law, a
+   second substrate, the same digests.
+9. 🔬 **Integer-exact training** (decade view; research) — inference
+   is portable by construction, training still pins the verifier to a
+   BLAS via float BPTT. Retiring that float dependency would make S2
+   replay-verification environment-free end to end. Start with a lab
+   (fixed-point or integer-SGD shadow on the v5 law) and a
+   falsifiable target: one canonical CRC reproduced across two
+   distinct BLAS environments where the float trainer differs.
 
 ## Completed backlog (Tier 2/3 era)
 

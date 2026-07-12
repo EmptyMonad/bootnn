@@ -32,8 +32,10 @@
 pub mod types;
 pub mod quantizers;
 pub mod pipeline;
+pub mod wire;
 
 // Re-exports for convenience
 pub use types::*;
 pub use quantizers::{RawObservation, RawEventData};
 pub use pipeline::{Pipeline, PipelineStats, TokenEncoder};
+pub use wire::{frame, FRAME_V1};
