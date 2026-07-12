@@ -37,7 +37,7 @@ from zlib import crc32
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from ledger import Ledger, canonical  # noqa: E402
+from ledger import Ledger, canonical, manifest_crc  # noqa: E402
 
 # The interview: fixed questions, enumerated answers. Free text is the
 # host conversation's job; by the time intent reaches the compiler it
@@ -80,8 +80,7 @@ def law_references():
     manifest = ROOT / "forest_manifest.json"
     if manifest.is_file():
         m = json.loads(manifest.read_text())
-        blobm = json.dumps(m, sort_keys=True, separators=(",", ":"))
-        refs["law.forest.crc"] = f"{crc32(blobm.encode()) & 0xFFFFFFFF:#010x}"
+        refs["law.forest.crc"] = f"{manifest_crc(m):#010x}"
     return refs
 
 
@@ -107,8 +106,7 @@ def compile_intent(answers, out_path, manifest_path=None):
                          op="create_leaf",
                          leaf=len(base["scopes"]),
                          scope=sorted(PROVISION_SCOPES[answers["specialist"]]),
-                         base_manifest_crc=crc32(
-                             canonical(base).encode()) & 0xFFFFFFFF)
+                         base_manifest_crc=manifest_crc(base))
 
     out = Path(out_path)
     if out.exists():

@@ -169,9 +169,12 @@ def dishonest_and_chain(tmp, led_path, m, mcrc, verified_man_crc):
     out = cli("--ledger", str(led_path), "verify", "--claim", str(idx),
               "--min-heldout", "0")
     assert "REJECTED (dishonest" in out, out
-    # The rejected claim must NOT advance the structure chain.
+    # The rejected claim must NOT advance the structure chain (the
+    # chain head is fold-derived state - the audited fold is the one
+    # authority).
     led = ledger.Ledger(led_path)
-    assert ledger.prior_structure_crc(led.entries) == verified_man_crc, \
+    led.fold()
+    assert led.structure_head == verified_man_crc, \
         "a rejected structural claim mutated the architecture"
     # Wrong base: a claim extending the ORIGINAL manifest instead of
     # the verified chain head is refused on grammar, before training.

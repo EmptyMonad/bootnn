@@ -74,6 +74,13 @@ class Ledger:
     def __init__(self, path):
         self.path = Path(path)
         self.entries = []
+        # Derived state, populated by fold() - the ONE authority for
+        # everything computed from the log (balances, minted coverage
+        # pairs, the structure chain head). Consumers read these after
+        # folding instead of running their own parallel scans with
+        # subtly different validity rules.
+        self.covered = set()
+        self.structure_head = None
         if self.path.is_file():
             self.entries = [json.loads(ln) for ln in
                             self.path.read_text().splitlines() if ln.strip()]
@@ -97,6 +104,7 @@ class Ledger:
         verdicted = set()
         leaves_spent = set()
         covered = set()
+        structure_head = None
         prev = GENESIS
         for e in self.entries:
             if e["prev"] != prev or \
@@ -172,6 +180,13 @@ class Ledger:
                                     covered.add(pair)
                                     balances[acct] = balances.get(acct, 0) \
                                         + MINT_PER_PORTABILITY
+                        elif c.get("op") == "create_leaf":
+                            balances[acct] = balances.get(acct, 0) \
+                                + MINT_PER_VERIFIED_CLAIM
+                            # The chain head structure claims extend:
+                            # only VERIFIED structure moves it, and only
+                            # through the audited fold.
+                            structure_head = c.get("claimed_manifest_crc")
                         else:
                             balances[acct] = balances.get(acct, 0) \
                                 + MINT_PER_VERIFIED_CLAIM
@@ -183,6 +198,8 @@ class Ledger:
                 else:
                     balances[src] -= amt
                     balances[dst] = balances.get(dst, 0) + amt
+        self.covered = covered
+        self.structure_head = structure_head
         return balances, errors
 
     def append(self, etype, data, author_seed=None):
@@ -272,30 +289,26 @@ def replay_claim(claim, out):
     return crc32(out.read_bytes()) & 0xFFFFFFFF
 
 
-def prior_structure_crc(entries):
-    """The manifest commitment of the LAST VERIFIED structural claim
-    in the log, or None. Structure claims must chain to it: rejected
-    claims never mutate the architecture."""
-    prior = None
-    claims = {e["idx"]: e["data"] for e in entries if e["type"] == "claim"}
-    for e in entries:
-        if e["type"] == "verdict" and e["data"].get("verified"):
-            c = claims.get(e["data"]["claim_idx"], {})
-            if c.get("op") == "create_leaf":
-                prior = c["claimed_manifest_crc"]
-    return prior
+def manifest_crc(m):
+    """CRC32 over the canonical JSON of a composite manifest - THE
+    serialization authority for the structure commitment. s3_forest
+    and the intent compiler both import this; a second inline copy is
+    how a compiled provision template becomes unclaimable."""
+    return crc32(canonical(m).encode()) & 0xFFFFFFFF
 
 
-def verify_structure(claim, entries):
+def verify_structure(claim, prior):
     """Structural verification IS structural replay: the grammar and
     chain are checked, the new leaf is retrained deterministically on
     its scoped view, and BOTH commitments - the leaf blob CRC and the
     derived composite manifest CRC - must reproduce. Worth is the new
     leaf's scoped held-out (the software impl of its oracle port).
+    `prior` is the fold-derived structure chain head (Ledger.fold sets
+    .structure_head) - the audited fold is the only chain authority.
     Returns (replay_ok, leaf_crc, manifest_crc, heldout, reason)."""
     sys.path.insert(0, str(ROOT / "tools"))
     import s3_forest
-    reason = s3_forest.validate_structure(claim, prior_structure_crc(entries))
+    reason = s3_forest.validate_structure(claim, prior)
     if reason is not None:
         return False, None, None, None, reason
     with tempfile.TemporaryDirectory() as td:
@@ -355,6 +368,115 @@ class SoftwareOracle(WorthOracle):
 
 
 WORTH_ORACLE = SoftwareOracle()
+
+
+# ── verdict handlers: one per claim op ──────────────────────────────
+# Each takes (led, claim, args) and returns (verdict_data, print_line);
+# the CLI tail appends the verdict and prints - once. Adding a claim op
+# means adding a handler here and a mint rule in fold(); the registry
+# refuses unknown ops instead of falling through to the training path.
+
+def _verdict_training(led, claim, args):
+    with tempfile.TemporaryDirectory() as td:
+        blob = Path(td) / "replayed.bin"
+        computed = replay_claim(claim, blob)
+        replay_ok = computed == claim["claimed_crc"]
+        heldout = None
+        if replay_ok:
+            # Honest - now is it WORTH anything? Worth enters through
+            # the oracle port named for the specialist (dishonest
+            # claims skip it: nothing of theirs to measure).
+            port = WORTH_ORACLE.port(claim.get("leaf", "root"))
+            heldout = round(port.measure(blob), 1)
+    verified = bool(replay_ok and heldout is not None
+                    and heldout >= args.min_heldout)
+    vd = {"claim_idx": args.claim, "verified": verified,
+          "computed_crc": computed, "replay_ok": replay_ok,
+          "heldout": heldout, "min_heldout": args.min_heldout}
+    crc_s = f"{computed:#010x}" if computed is not None else "none"
+    if not replay_ok:
+        outcome = "REJECTED (dishonest: replay disagrees)"
+    elif verified:
+        outcome = (f"VERIFIED (heldout {heldout}% >= "
+                   f"{args.min_heldout}%, +{MINT_PER_VERIFIED_CLAIM} "
+                   f"minted)")
+    else:
+        outcome = (f"REJECTED (honest but below quality bar: "
+                   f"heldout {heldout}% < {args.min_heldout}%)")
+    return vd, (f"[ledger] claim {args.claim}: claimed "
+                f"{claim['claimed_crc']:#010x}, replay produced "
+                f"{crc_s} -> {outcome}")
+
+
+def _verdict_structure(led, claim, args):
+    led.fold()   # the audited fold is the one chain authority
+    replay_ok, leaf_crc, mcrc, heldout, reason = \
+        verify_structure(claim, led.structure_head)
+    verified = bool(replay_ok and heldout is not None
+                    and heldout >= args.min_heldout)
+    vd = {"claim_idx": args.claim, "verified": verified,
+          "computed_crc": leaf_crc, "computed_manifest_crc": mcrc,
+          "replay_ok": replay_ok, "heldout": heldout,
+          "min_heldout": args.min_heldout}
+    if reason is not None:
+        vd["reason"] = reason
+        outcome = f"REJECTED (grammar: {reason})"
+    elif not replay_ok:
+        outcome = "REJECTED (dishonest: structural replay disagrees)"
+    elif verified:
+        outcome = (f"VERIFIED (leaf heldout {heldout}% >= "
+                   f"{args.min_heldout}%, structure minted, "
+                   f"+{MINT_PER_VERIFIED_CLAIM})")
+    else:
+        outcome = (f"REJECTED (honest but below quality bar: "
+                   f"heldout {heldout}% < {args.min_heldout}%)")
+    return vd, f"[ledger] structural claim {args.claim}: -> {outcome}"
+
+
+def _verdict_portability(led, claim, args):
+    sys.path.insert(0, str(ROOT / "tools"))
+    import portability
+    reason = portability.validate_portability(claim)
+    if reason is None:
+        # Coverage already minted for this pair? The fold's covered
+        # set is the same rule the mint applies - one derivation, no
+        # drift - and it is settled without booting anything.
+        led.fold()
+        if (claim["artifact_crc"], claim["profile"]) in led.covered:
+            reason = "coverage already minted for this pair"
+    if reason is not None:
+        return ({"claim_idx": args.claim, "verified": False,
+                 "replay_ok": False, "reason": reason},
+                f"[ledger] portability claim {args.claim}: -> "
+                f"REJECTED ({reason})")
+    acrc = crc32(Path(args.artifact).read_bytes()) & 0xFFFFFFFF
+    if acrc != claim["artifact_crc"]:
+        sys.exit(f"ERROR: artifact {args.artifact} has crc "
+                 f"{acrc:#010x}, claim covers "
+                 f"{claim['artifact_crc']:#010x} - not verdictable "
+                 f"with this file")
+    replay_ok, law_ok, metal_d, law_d = \
+        portability.verify_portability(claim, args.artifact)
+    verified = bool(replay_ok and law_ok)
+    vd = {"claim_idx": args.claim, "verified": verified,
+          "replay_ok": replay_ok, "law_ok": law_ok,
+          "computed_digest": metal_d, "law_digest": law_d}
+    if verified:
+        outcome = (f"VERIFIED (metal == claim == law, "
+                   f"{metal_d:#010x}; coverage minted, "
+                   f"+{MINT_PER_PORTABILITY})")
+    elif not replay_ok:
+        outcome = (f"REJECTED (dishonest: metal {metal_d:#010x} "
+                   f"!= claimed {claim['claimed_digest']:#010x})")
+    else:
+        outcome = (f"REJECTED (profile diverges from law: metal "
+                   f"{metal_d:#010x} != law {law_d:#010x})")
+    return vd, f"[ledger] portability claim {args.claim}: -> {outcome}"
+
+
+VERDICT_HANDLERS = {None: _verdict_training,
+                    "create_leaf": _verdict_structure,
+                    "portability": _verdict_portability}
 
 
 def main():
@@ -516,116 +638,14 @@ def main():
                e["data"]["claim_idx"] == args.claim:
                 sys.exit(f"ERROR: claim {args.claim} already has a "
                          f"verdict (entry {e['idx']}) - not replaying")
-        if claim.get("op") == "portability":
-            sys.path.insert(0, str(ROOT / "tools"))
-            import portability
-            reason = portability.validate_portability(claim)
-            if reason is None:
-                # Coverage already minted for this pair? Deterministic
-                # from the log; settled without booting anything.
-                claims_by_idx = {e["idx"]: e["data"] for e in led.entries
-                                 if e["type"] == "claim"}
-                for e in led.entries:
-                    if e["type"] != "verdict" or \
-                       not e["data"].get("verified"):
-                        continue
-                    c2 = claims_by_idx.get(e["data"]["claim_idx"], {})
-                    if c2.get("op") == "portability" and \
-                       c2["artifact_crc"] == claim["artifact_crc"] and \
-                       c2["profile"] == claim["profile"]:
-                        reason = "coverage already minted for this pair"
-                        break
-            if reason is not None:
-                led.append("verdict", {"claim_idx": args.claim,
-                                       "verified": False,
-                                       "replay_ok": False,
-                                       "reason": reason})
-                print(f"[ledger] portability claim {args.claim}: -> "
-                      f"REJECTED ({reason})")
-                return
-            acrc = crc32(Path(args.artifact).read_bytes()) & 0xFFFFFFFF
-            if acrc != claim["artifact_crc"]:
-                sys.exit(f"ERROR: artifact {args.artifact} has crc "
-                         f"{acrc:#010x}, claim covers "
-                         f"{claim['artifact_crc']:#010x} - not verdictable "
-                         f"with this file")
-            replay_ok, law_ok, metal_d, law_d = \
-                portability.verify_portability(claim, args.artifact)
-            verified = bool(replay_ok and law_ok)
-            led.append("verdict", {"claim_idx": args.claim,
-                                   "verified": verified,
-                                   "replay_ok": replay_ok,
-                                   "law_ok": law_ok,
-                                   "computed_digest": metal_d,
-                                   "law_digest": law_d})
-            if verified:
-                outcome = (f"VERIFIED (metal == claim == law, "
-                           f"{metal_d:#010x}; coverage minted, "
-                           f"+{MINT_PER_PORTABILITY})")
-            elif not replay_ok:
-                outcome = (f"REJECTED (dishonest: metal {metal_d:#010x} "
-                           f"!= claimed {claim['claimed_digest']:#010x})")
-            else:
-                outcome = (f"REJECTED (profile diverges from law: metal "
-                           f"{metal_d:#010x} != law {law_d:#010x})")
-            print(f"[ledger] portability claim {args.claim}: -> {outcome}")
-            return
-        if claim.get("op") == "create_leaf":
-            replay_ok, leaf_crc, mcrc, heldout, reason = \
-                verify_structure(claim, led.entries)
-            verified = bool(replay_ok and heldout is not None
-                            and heldout >= args.min_heldout)
-            vd = {"claim_idx": args.claim, "verified": verified,
-                  "computed_crc": leaf_crc,
-                  "computed_manifest_crc": mcrc,
-                  "replay_ok": replay_ok, "heldout": heldout,
-                  "min_heldout": args.min_heldout}
-            if reason is not None:
-                vd["reason"] = reason
-            led.append("verdict", vd)
-            if reason is not None:
-                outcome = f"REJECTED (grammar: {reason})"
-            elif not replay_ok:
-                outcome = "REJECTED (dishonest: structural replay disagrees)"
-            elif verified:
-                outcome = (f"VERIFIED (leaf heldout {heldout}% >= "
-                           f"{args.min_heldout}%, structure minted, "
-                           f"+{MINT_PER_VERIFIED_CLAIM})")
-            else:
-                outcome = (f"REJECTED (honest but below quality bar: "
-                           f"heldout {heldout}% < {args.min_heldout}%)")
-            print(f"[ledger] structural claim {args.claim}: -> {outcome}")
-            return
-        with tempfile.TemporaryDirectory() as td:
-            blob = Path(td) / "replayed.bin"
-            computed = replay_claim(claim, blob)
-            replay_ok = computed == claim["claimed_crc"]
-            heldout = None
-            if replay_ok:
-                # Honest - now is it WORTH anything? Worth enters through
-                # the oracle port named for the specialist (dishonest
-                # claims skip it: nothing of theirs to measure).
-                port = WORTH_ORACLE.port(claim.get("leaf", "root"))
-                heldout = round(port.measure(blob), 1)
-        verified = bool(replay_ok and heldout is not None
-                        and heldout >= args.min_heldout)
-        e = led.append("verdict", {
-            "claim_idx": args.claim, "verified": verified,
-            "computed_crc": computed, "replay_ok": replay_ok,
-            "heldout": heldout, "min_heldout": args.min_heldout})
-        crc_s = f"{computed:#010x}" if computed is not None else "none"
-        if not replay_ok:
-            outcome = "REJECTED (dishonest: replay disagrees)"
-        elif verified:
-            outcome = (f"VERIFIED (heldout {heldout}% >= "
-                       f"{args.min_heldout}%, +{MINT_PER_VERIFIED_CLAIM} "
-                       f"minted)")
-        else:
-            outcome = (f"REJECTED (honest but below quality bar: "
-                       f"heldout {heldout}% < {args.min_heldout}%)")
-        print(f"[ledger] claim {args.claim}: claimed "
-              f"{claim['claimed_crc']:#010x}, replay produced "
-              f"{crc_s} -> {outcome}")
+        op = claim.get("op")
+        handler = VERDICT_HANDLERS.get(op)
+        if handler is None:
+            sys.exit(f"ERROR: claim {args.claim} has unknown op {op!r} - "
+                     f"no verifier registered")
+        vd, line = handler(led, claim, args)
+        led.append("verdict", vd)
+        print(line)
 
     elif args.cmd == "transfer":
         led.append("transfer", {"src": args.src, "dst": args.dst,

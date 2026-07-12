@@ -193,9 +193,11 @@ def table_of_manifest(m):
             "fallback_mod": m["fallback_mod"]}
 
 
-def manifest_crc(m):
-    blob = json.dumps(m, sort_keys=True, separators=(",", ":"))
-    return crc32(blob.encode()) & 0xFFFFFFFF
+# THE commitment serialization lives in ledger.py (stdlib-only, next to
+# the canonical-JSON helper); re-exported here because structure
+# semantics consume it. ledger imports s3_forest only lazily, so this
+# module-level import is cycle-free.
+from ledger import manifest_crc  # noqa: E402
 
 
 def validate_structure(data, prior_manifest_crc=None):
