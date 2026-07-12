@@ -24,10 +24,13 @@ recipe; the claim grammar and the digests do not change.
 
 import json
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from zlib import crc32
 
@@ -43,29 +46,165 @@ from train import SsmMachine  # noqa: E402
 IMAGE = ROOT / "dnos.img"
 SYMBOLS = ROOT / "dnos_symbols.json"
 
-# The verifier's capability list. Keys are profile ids carried in
-# claims; values describe how THIS verifier boots that profile.
-PROFILES = {
-    "qemu-tcg-x86": {
-        "desc": "QEMU TCG emulation, 32-bit x86 PC (the CI profile)",
-        "boot_seconds": 6.0,
-        "key_seconds": 0.8,
-    },
-    "qemu-tcg-riscv32-virt": {
-        "desc": "QEMU TCG, RISC-V rv32imac virt machine - the dnos-rv "
-                "law runner (rv/), events over the S1 wire",
-        "boot_seconds": 2.5,
-        "key_seconds": 0.4,
-    },
-}
-
 # The rv runner's fixed state block (rv/src/main.rs) - the RISC-V
 # equivalent of dnos_symbols.json, known by construction.
 RV_ELF = ROOT / "rv" / "target" / "riscv32imac-unknown-none-elf" \
     / "release" / "dnos-rv"
 RV_SYM = {"magic": 0x80200000, "hdr_status": 0x80200004,
-          "last_cmd": 0x80200008, "h_state": 0x80200018}
+          "last_cmd": 0x80200008, "step_count": 0x8020000C,
+          "h_state": 0x80200018}
 RV_MAGIC = 0x52564E44
+
+# What each profile's SUBSTRATE can actually run, as a predicate over
+# the header's five sizes. The x86 kernel's buffers are compiled for
+# the canonical topology (its own validate_weights rejects anything
+# else at boot - the harness just fails fast and legibly, before a
+# boot that would halt red). The rv runner reads topology from the
+# header but its h block, drive loop, and readout buffers have caps.
+X86_TOPOLOGY = (8, 512, 1024, 384, 64)
+
+
+def _sibling_qemu(name):
+    """Find a qemu system binary next to the discovered i386 one, or
+    on PATH (CI installs qemu-system-misc there)."""
+    sib = Path(find_qemu(None)).parent / f"{name}.exe"
+    if sib.is_file():
+        return str(sib)
+    found = shutil.which(name)
+    if found:
+        return found
+    sys.exit(f"ERROR: {name} not found (next to qemu-system-i386 or "
+             f"on PATH)")
+
+
+def _teardown(proc, qmp):
+    try:
+        qmp.execute("quit", expect_reply=False)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+@contextmanager
+def _x86_session(artifact_path, port, qemu):
+    """Patch the artifact into a COPY of the image at the weight
+    sector, boot the PC profile; keys are PS/2 qcodes over QMP."""
+    if not IMAGE.is_file() or not SYMBOLS.is_file():
+        sys.exit("ERROR: dnos.img / dnos_symbols.json missing - run "
+                 "tools/build.py first")
+    sym = json.loads(SYMBOLS.read_text())
+    blob = Path(artifact_path).read_bytes()
+    with tempfile.TemporaryDirectory() as td:
+        img = Path(td) / "portability.img"
+        shutil.copyfile(IMAGE, img)
+        with img.open("r+b") as f:
+            f.seek(WEIGHT_SECTOR * SECTOR_SIZE)
+            f.write(blob)
+        cmd = [qemu or find_qemu(None), "-drive",
+               f"file={img},format=raw", "-m", "16M", "-display", "none",
+               "-qmp", f"tcp:127.0.0.1:{port},server,nowait",
+               "-no-reboot", "-no-shutdown"]
+        print(f"[portability] booting qemu-tcg-x86: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd)
+        try:
+            qmp = QMP("127.0.0.1", port)
+
+            def send(k):
+                qmp.execute("send-key", keys=[{"type": "qcode", "data": k}])
+
+            yield qmp, sym, send
+        finally:
+            _teardown(proc, qmp)
+
+
+@contextmanager
+def _riscv_session(artifact_path, port, qemu):
+    """The rv law runner: no image, no patching - QEMU's loader places
+    the artifact verbatim at the blob address; events travel as S1 v1
+    frames over the UART (virt has no keyboard, and the wire is the
+    substrate-neutral input surface anyway)."""
+    from dnos_client import frame  # noqa: E402
+    if not RV_ELF.is_file():
+        print("[portability] building rv law runner...")
+        r = subprocess.run(
+            ["cargo", "build", "--release", "--manifest-path",
+             str(ROOT / "rv" / "Cargo.toml"),
+             "--target", "riscv32imac-unknown-none-elf"],
+            capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            print(r.stdout, r.stderr)
+            sys.exit("ERROR: rv runner build failed")
+    serial_port = port + 1
+    cmd = [qemu or _sibling_qemu("qemu-system-riscv32"),
+           "-M", "virt", "-bios", "none", "-kernel", str(RV_ELF),
+           "-device", f"loader,file={artifact_path},addr=0x80400000",
+           "-m", "32M", "-display", "none",
+           "-qmp", f"tcp:127.0.0.1:{port},server,nowait",
+           "-serial", f"tcp:127.0.0.1:{serial_port},server=on,wait=off",
+           "-no-reboot", "-no-shutdown"]
+    print(f"[portability] booting qemu-tcg-riscv32-virt: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd)
+    try:
+        qmp = QMP("127.0.0.1", port)
+        # The wire connect races guest startup on a loaded host:
+        # retry in a deadline loop instead of one shot.
+        deadline = time.time() + 10
+        while True:
+            try:
+                wire = socket.create_connection(
+                    ("127.0.0.1", serial_port), timeout=2)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.1)
+
+        def send(k):
+            wire.sendall(frame(ord(k)))
+
+        yield qmp, RV_SYM, send
+    finally:
+        _teardown(proc, qmp)
+
+
+# The verifier's capability list - one RECIPE per profile: how to boot
+# it (session), what it can run (topology), and how to pace the probe
+# (key_wait). validate_portability accepts exactly the ids listed
+# here, and metal_trajectory refuses an entry missing its recipe
+# rather than guessing a substrate.
+PROFILES = {
+    "qemu-tcg-x86": {
+        "desc": "QEMU TCG emulation, 32-bit x86 PC (the CI profile)",
+        # The x86 kernel's step_count advances EVERY tick (one state
+        # transition per PIT tick, event or not - src/dnos.asm:1096),
+        # so a per-key step poll is meaningless there: keys use the
+        # CI-proven fixed sleep. Readiness still polls.
+        "boot_seconds": 6.0,
+        "key_seconds": 0.8,
+        "key_wait": "sleep",
+        "topology": lambda s: None if s == X86_TOPOLOGY else
+            f"kernel is compiled for {X86_TOPOLOGY}",
+        "session": _x86_session,
+    },
+    "qemu-tcg-riscv32-virt": {
+        "desc": "QEMU TCG, RISC-V rv32imac virt machine - the dnos-rv "
+                "law runner (rv/), events over the S1 wire",
+        # The rv runner counts LAW steps (= events) and increments
+        # step_count LAST in law_step, so polling it is exact: once
+        # observed, last_cmd and h are final for that event.
+        # key_seconds is the per-key TIMEOUT bound, not a sleep.
+        "boot_seconds": 2.5,
+        "key_seconds": 0.4,
+        "key_wait": "poll_steps",
+        "topology": lambda s: None if (s[0] == 8 and s[1] == 512
+                                       and s[2] <= 1024 and s[3] <= 512)
+            else "n_in must be 8, h 512; readout caps 1024/512",
+        "session": _riscv_session,
+    },
+}
 
 PROBE_SAFE = set("abcdefghijklmnopqrstuvwxyz0123456789")
 
@@ -104,28 +243,17 @@ def validate_portability(data):
     return None
 
 
-# What each profile's SUBSTRATE can actually run. The x86 kernel's
-# buffers are compiled for the canonical topology (its own
-# validate_weights rejects anything else at boot - this check just
-# fails fast and legibly, before a boot that would halt red). The rv
-# runner reads topology from the header but its h block and the
-# digest domain are 512 channels, and its readout buffers cap r1/r2.
-X86_TOPOLOGY = (8, 512, 1024, 384, 64)
-
-
 def _check_topology(profile_id, artifact_path):
-    import struct
+    """Refuse, before any boot, a blob the profile's substrate cannot
+    run - with the reason named by the profile's own predicate."""
     hdr = Path(artifact_path).read_bytes()[:16]
     if hdr[:2] != b"DN" or hdr[2] != 5:
         sys.exit(f"ERROR: {artifact_path} is not a v5 blob")
     sizes = struct.unpack_from("<HHHHH", hdr, 5)
-    if profile_id == "qemu-tcg-x86" and sizes != X86_TOPOLOGY:
+    reason = PROFILES[profile_id]["topology"](sizes)
+    if reason is not None:
         sys.exit(f"ERROR: topology {sizes} is not runnable on "
-                 f"{profile_id} (kernel is compiled for {X86_TOPOLOGY})")
-    if profile_id == "qemu-tcg-riscv32-virt" and \
-       (sizes[1] != 512 or sizes[2] > 1024 or sizes[3] > 512):
-        sys.exit(f"ERROR: topology {sizes} is not runnable on "
-                 f"{profile_id} (h must be 512; readout caps 1024/512)")
+                 f"{profile_id} ({reason})")
 
 
 def _h_crc(h):
@@ -154,135 +282,61 @@ def sim_trajectory(weights_path, probe):
     return records, digest_of(records)
 
 
+def _poll(cond, timeout, desc, interval=0.02):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return
+        time.sleep(interval)
+    sys.exit(f"ERROR: timed out waiting for {desc}")
+
+
 def metal_trajectory(profile_id, artifact_path, probe, port=55670,
                      qemu=None):
     """Boot the named profile with the artifact supplied verbatim,
     drive the probe, read (last_cmd, h_crc) after each key over QMP.
-    Returns (records, digest). Each profile is a boot recipe; the
-    digest domain is identical across profiles - that is the claim."""
+    Returns (records, digest). The profile's RECIPE (session, topology,
+    pacing) comes from the table; the drive loop and the digest domain
+    are identical across profiles - that is the claim. A profile
+    listed without a recipe fails loudly: never guess a substrate and
+    burn the claim's single verdict slot on an unearned REJECTED."""
+    profile = PROFILES.get(profile_id)
+    if profile is None or "session" not in profile:
+        sys.exit(f"ERROR: profile {profile_id!r} has no boot recipe - "
+                 f"refusing to guess a substrate")
     _check_topology(profile_id, artifact_path)
-    if profile_id == "qemu-tcg-riscv32-virt":
-        return _riscv_trajectory(artifact_path, probe, port, qemu)
-    if profile_id == "qemu-tcg-x86":
-        return _x86_trajectory(profile_id, artifact_path, probe, port, qemu)
-    # A profile in PROFILES (so validate_portability accepts it) but
-    # with no boot recipe must fail LOUDLY - never silently fall
-    # through to the x86 substrate, which would boot the wrong machine
-    # and burn the claim's single verdict slot on a REJECTED it never
-    # earned.
-    sys.exit(f"ERROR: profile {profile_id!r} is listed but has no boot "
-             f"recipe - refusing to guess a substrate")
-
-
-def _sibling_qemu(name):
-    """Find a qemu system binary next to the discovered i386 one, or
-    on PATH (CI installs qemu-system-misc there)."""
-    sib = Path(find_qemu(None)).parent / f"{name}.exe"
-    if sib.is_file():
-        return str(sib)
-    found = shutil.which(name)
-    if found:
-        return found
-    sys.exit(f"ERROR: {name} not found (next to qemu-system-i386 or "
-             f"on PATH)")
-
-
-def _riscv_trajectory(artifact_path, probe, port, qemu):
-    """The rv law runner: no image, no patching - QEMU's loader places
-    the artifact verbatim at the blob address; events travel as S1 v1
-    frames over the UART (virt has no keyboard, and the wire is the
-    substrate-neutral input surface anyway)."""
-    from dnos_client import frame  # noqa: E402
     from swarm_test import h_digest, read_sym  # noqa: E402
-    profile = PROFILES["qemu-tcg-riscv32-virt"]
-    if not RV_ELF.is_file():
-        print("[portability] building rv law runner...")
-        r = subprocess.run(
-            ["cargo", "build", "--release", "--manifest-path",
-             str(ROOT / "rv" / "Cargo.toml"),
-             "--target", "riscv32imac-unknown-none-elf"],
-            capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            print(r.stdout, r.stderr)
-            sys.exit("ERROR: rv runner build failed")
-    serial_port = port + 1
-    cmd = [qemu or _sibling_qemu("qemu-system-riscv32"),
-           "-M", "virt", "-bios", "none", "-kernel", str(RV_ELF),
-           "-device", f"loader,file={artifact_path},addr=0x80400000",
-           "-m", "32M", "-display", "none",
-           "-qmp", f"tcp:127.0.0.1:{port},server,nowait",
-           "-serial", f"tcp:127.0.0.1:{serial_port},server=on,wait=off",
-           "-no-reboot", "-no-shutdown"]
-    print(f"[portability] booting qemu-tcg-riscv32-virt: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd)
+
     records = []
-    try:
-        qmp = QMP("127.0.0.1", port)
-        time.sleep(profile["boot_seconds"])
-        if read_sym(qmp, RV_SYM["magic"], 4) != RV_MAGIC:
-            sys.exit("ERROR: rv runner state block missing after boot")
-        if read_sym(qmp, RV_SYM["hdr_status"], 4) != 1:
-            sys.exit("ERROR: rv runner refused the artifact "
-                     "(header/CRC validation failed)")
-        import socket
-        wire = socket.create_connection(("127.0.0.1", serial_port),
-                                        timeout=3)
-        for k in probe:
-            wire.sendall(frame(ord(k)))
-            time.sleep(profile["key_seconds"])
-            records.append((k, read_sym(qmp, RV_SYM["last_cmd"], 4),
-                            h_digest(qmp, RV_SYM)))
-        try:
-            qmp.execute("quit", expect_reply=False)
-        except OSError:
-            pass
-    finally:
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    return records, digest_of(records)
+    with profile["session"](artifact_path, port, qemu) as (qmp, sym, send):
+        def steps():
+            return read_sym(qmp, sym["step_count"], 4)
 
+        def ready():
+            # QEMU zeroes guest RAM, so pre-boot reads are 0 - the
+            # conditions below cannot fire early on garbage.
+            if "magic" in sym and \
+               read_sym(qmp, sym["magic"], 4) != RV_MAGIC:
+                return False
+            hdr = read_sym(qmp, sym["hdr_status"], 4)
+            if hdr == 2:
+                sys.exit("ERROR: substrate refused the artifact "
+                         "(header/CRC validation failed)")
+            return hdr == 1 and steps() >= len(DEMO_KEYS)
 
-def _x86_trajectory(profile_id, artifact_path, probe, port, qemu):
-    profile = PROFILES[profile_id]
-    if not IMAGE.is_file() or not SYMBOLS.is_file():
-        sys.exit("ERROR: dnos.img / dnos_symbols.json missing - run "
-                 "tools/build.py first")
-    sym = json.loads(SYMBOLS.read_text())
-    from swarm_test import h_digest, read_sym  # noqa: E402 (needs sym file)
-
-    blob = Path(artifact_path).read_bytes()
-    with tempfile.TemporaryDirectory() as td:
-        img = Path(td) / "portability.img"
-        shutil.copyfile(IMAGE, img)
-        with img.open("r+b") as f:
-            f.seek(WEIGHT_SECTOR * SECTOR_SIZE)
-            f.write(blob)
-        cmd = [qemu or find_qemu(None), "-drive",
-               f"file={img},format=raw", "-m", "16M", "-display", "none",
-               "-qmp", f"tcp:127.0.0.1:{port},server,nowait",
-               "-no-reboot", "-no-shutdown"]
-        print(f"[portability] booting {profile_id}: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd)
-        records = []
-        try:
-            qmp = QMP("127.0.0.1", port)
-            time.sleep(profile["boot_seconds"])
-            for k in probe:
-                qmp.execute("send-key", keys=[{"type": "qcode", "data": k}])
+        _poll(ready, profile["boot_seconds"] * 3,
+              "artifact validation + boot demo")
+        base = steps()
+        for i, k in enumerate(probe):
+            send(k)
+            if profile["key_wait"] == "poll_steps":
+                _poll(lambda n=base + i + 1: steps() >= n,
+                      profile["key_seconds"] * 10,
+                      f"law step for key {k!r}")
+            else:
                 time.sleep(profile["key_seconds"])
-                records.append((k, read_sym(qmp, sym["last_cmd"], 4),
-                                h_digest(qmp, sym)))
-            try:
-                qmp.execute("quit", expect_reply=False)
-            except OSError:
-                pass
-        finally:
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            records.append((k, read_sym(qmp, sym["last_cmd"], 4),
+                            h_digest(qmp, sym)))
     return records, digest_of(records)
 
 

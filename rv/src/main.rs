@@ -45,6 +45,12 @@ const STATE_BASE: u32 = 0x8020_0000;
 const MAGIC: u32 = 0x5256_4E44; // "DNVR"
 // offsets: +0 magic, +4 hdr_status, +8 last_cmd, +12 step_count,
 //          +16 serial_rx_count, +20 serial_bad_frames, +24 h[512] i16
+// step_count counts LAW steps (= events consumed) and is incremented
+// LAST in law_step, so an observer that sees it advance knows
+// last_cmd and h are final for that event. NOTE: the x86 kernel's
+// step_count counts TICKS (one transition per PIT tick, event or
+// not) - neither is replicated state; both are age. The portability
+// harness paces per-key polling on this difference.
 
 const BLOB_BASE: u32 = 0x8040_0000;
 const HEADER_SIZE: u32 = 128;
