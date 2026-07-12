@@ -51,7 +51,21 @@ PROFILES = {
         "boot_seconds": 6.0,
         "key_seconds": 0.8,
     },
+    "qemu-tcg-riscv32-virt": {
+        "desc": "QEMU TCG, RISC-V rv32imac virt machine - the dnos-rv "
+                "law runner (rv/), events over the S1 wire",
+        "boot_seconds": 2.5,
+        "key_seconds": 0.4,
+    },
 }
+
+# The rv runner's fixed state block (rv/src/main.rs) - the RISC-V
+# equivalent of dnos_symbols.json, known by construction.
+RV_ELF = ROOT / "rv" / "target" / "riscv32imac-unknown-none-elf" \
+    / "release" / "dnos-rv"
+RV_SYM = {"magic": 0x80200000, "hdr_status": 0x80200004,
+          "last_cmd": 0x80200008, "h_state": 0x80200018}
+RV_MAGIC = 0x52564E44
 
 PROBE_SAFE = set("abcdefghijklmnopqrstuvwxyz0123456789")
 
@@ -103,9 +117,86 @@ def sim_trajectory(weights_path, probe):
 
 def metal_trajectory(profile_id, artifact_path, probe, port=55670,
                      qemu=None):
-    """Boot the named profile with the artifact patched into a COPY of
-    the image, drive the probe over QMP, read (last_cmd, h_crc) after
-    each key. Returns (records, digest)."""
+    """Boot the named profile with the artifact supplied verbatim,
+    drive the probe, read (last_cmd, h_crc) after each key over QMP.
+    Returns (records, digest). Each profile is a boot recipe; the
+    digest domain is identical across profiles - that is the claim."""
+    if profile_id == "qemu-tcg-riscv32-virt":
+        return _riscv_trajectory(artifact_path, probe, port, qemu)
+    return _x86_trajectory(profile_id, artifact_path, probe, port, qemu)
+
+
+def _sibling_qemu(name):
+    """Find a qemu system binary next to the discovered i386 one, or
+    on PATH (CI installs qemu-system-misc there)."""
+    sib = Path(find_qemu(None)).parent / f"{name}.exe"
+    if sib.is_file():
+        return str(sib)
+    found = shutil.which(name)
+    if found:
+        return found
+    sys.exit(f"ERROR: {name} not found (next to qemu-system-i386 or "
+             f"on PATH)")
+
+
+def _riscv_trajectory(artifact_path, probe, port, qemu):
+    """The rv law runner: no image, no patching - QEMU's loader places
+    the artifact verbatim at the blob address; events travel as S1 v1
+    frames over the UART (virt has no keyboard, and the wire is the
+    substrate-neutral input surface anyway)."""
+    from dnos_client import frame  # noqa: E402
+    from swarm_test import h_digest, read_sym  # noqa: E402
+    profile = PROFILES["qemu-tcg-riscv32-virt"]
+    if not RV_ELF.is_file():
+        print("[portability] building rv law runner...")
+        r = subprocess.run(
+            ["cargo", "build", "--release", "--manifest-path",
+             str(ROOT / "rv" / "Cargo.toml"),
+             "--target", "riscv32imac-unknown-none-elf"],
+            capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            print(r.stdout, r.stderr)
+            sys.exit("ERROR: rv runner build failed")
+    serial_port = port + 1
+    cmd = [qemu or _sibling_qemu("qemu-system-riscv32"),
+           "-M", "virt", "-bios", "none", "-kernel", str(RV_ELF),
+           "-device", f"loader,file={artifact_path},addr=0x80400000",
+           "-m", "32M", "-display", "none",
+           "-qmp", f"tcp:127.0.0.1:{port},server,nowait",
+           "-serial", f"tcp:127.0.0.1:{serial_port},server=on,wait=off",
+           "-no-reboot", "-no-shutdown"]
+    print(f"[portability] booting qemu-tcg-riscv32-virt: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd)
+    records = []
+    try:
+        qmp = QMP("127.0.0.1", port)
+        time.sleep(profile["boot_seconds"])
+        if read_sym(qmp, RV_SYM["magic"], 4) != RV_MAGIC:
+            sys.exit("ERROR: rv runner state block missing after boot")
+        if read_sym(qmp, RV_SYM["hdr_status"], 4) != 1:
+            sys.exit("ERROR: rv runner refused the artifact "
+                     "(header/CRC validation failed)")
+        import socket
+        wire = socket.create_connection(("127.0.0.1", serial_port),
+                                        timeout=3)
+        for k in probe:
+            wire.sendall(frame(ord(k)))
+            time.sleep(profile["key_seconds"])
+            records.append((k, read_sym(qmp, RV_SYM["last_cmd"], 4),
+                            h_digest(qmp, RV_SYM)))
+        try:
+            qmp.execute("quit", expect_reply=False)
+        except OSError:
+            pass
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return records, digest_of(records)
+
+
+def _x86_trajectory(profile_id, artifact_path, probe, port, qemu):
     profile = PROFILES[profile_id]
     if not IMAGE.is_file() or not SYMBOLS.is_file():
         sys.exit("ERROR: dnos.img / dnos_symbols.json missing - run "

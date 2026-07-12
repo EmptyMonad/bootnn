@@ -10,6 +10,12 @@ contribution (S2 hardware-profile reward class).
      with a SECOND independent boot -> VERIFIED: metal == claim ==
      law, coverage mints, audit clean. Cross-boot digest equality is
      the determinism claim itself.
+  2b. SECOND ISA: the same artifact claims qemu-tcg-riscv32-virt (the
+     rv/ law runner - bare-metal RISC-V, events over the S1 wire) in
+     the SAME ledger. Both profiles must produce the IDENTICAL
+     trajectory digest - same law, second substrate, same digests -
+     and the pair mints separately: one artifact, two profiles, two
+     mints. This is the scenario the reward class exists for.
   3. DISHONESTY: a wrong claimed digest is exposed by the metal
      replay (boot 3) and rejected.
   4. UNIQUENESS: a duplicate (artifact, profile) claim is rejected
@@ -20,7 +26,7 @@ contribution (S2 hardware-profile reward class).
      manufacturing a genuinely unfaithful profile means breaking the
      kernel, which is integrity_test's business).
 
-Three QEMU boots total; requires dnos.img (tools/build.py).
+Five QEMU boots total (x86 measure+verify, riscv measure+verify, dishonest); requires dnos.img (tools/build.py) and the rv runner (built on demand).
 """
 
 import subprocess
@@ -89,6 +95,28 @@ def honest_and_dishonest(tmp):
     measured = led.entries[0]["data"]["claimed_digest"]
     print(f"[portability_test] honest: two independent boots agree "
           f"({measured:#010x}), coverage minted {balances['gina']}")
+
+    # Second ISA, same ledger, same artifact (boots 3+4: measure on
+    # RISC-V, verify on RISC-V).
+    out = cli("--ledger", str(led_path), "submit-portability",
+              "--account", "gina", "--artifact", str(ARTIFACT),
+              "--profile", "qemu-tcg-riscv32-virt", "--probe", PROBE,
+              "--measure")
+    assert "portability claim recorded" in out, out
+    out = cli("--ledger", str(led_path), "verify", "--claim", "2",
+              "--artifact", str(ARTIFACT))
+    assert "VERIFIED (metal == claim == law" in out, out
+    led = ledger.Ledger(led_path)
+    rv_digest = led.entries[2]["data"]["claimed_digest"]
+    assert rv_digest == measured, \
+        (f"profiles disagree on the law's trajectory: x86 "
+         f"{measured:#010x} vs riscv {rv_digest:#010x}")
+    balances, errors = led.fold()
+    assert not errors, errors
+    assert balances["gina"] == 2 * ledger.MINT_PER_PORTABILITY
+    print(f"[portability_test] second ISA: x86 and riscv32 produce the "
+          f"IDENTICAL digest {rv_digest:#010x}; one artifact, two "
+          f"profiles, two mints ({balances['gina']})")
 
     # Dishonest: a digest metal cannot reproduce (boot 3).
     lie = dict(led.entries[0]["data"], account="hank",

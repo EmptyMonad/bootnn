@@ -1,0 +1,13 @@
+[package]
+name = "dnos-rv"
+version = "0.1.0"
+edition = "2021"
+description = "DNOS law runner for bare-metal RISC-V (qemu -M virt): the v5 recurrent-ternary law on a second ISA"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"

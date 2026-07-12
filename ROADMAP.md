@@ -356,9 +356,28 @@ conversation. Order is deliberate.
    grammar and digests don't change. Gate runs 3 boots (~40 s):
    grammar refusals, two independent boots agreeing bit-exactly,
    dishonest digest exposed, uniqueness, law-divergence wiring.
-8. 📋 **RISC-V second hardware profile** (decade view) — what makes
-   the portability mint real rather than reflexive: the same law, a
-   second substrate, the same digests.
+8. ✅ **RISC-V second hardware profile (2026-07-12, `rv/` + profile
+   `qemu-tcg-riscv32-virt`)** — a bare-metal Rust LAW RUNNER for
+   `qemu -M virt`, not a kernel port: it validates the v5 blob
+   (magic, version, payload CRC, reserved code 10 — the same
+   map-before-territory discipline as the x86 boot), self-plays the
+   x86 kernel's `pboxline` demo so one simulator path predicts both
+   profiles, then serves S1 v1 frames from the UART, one law step
+   per event. Law state (last_cmd, h, frame counters) sits at a
+   fixed block read over QMP. The artifact is supplied VERBATIM by
+   `-device loader` — no image, no patching, any CRC boots. Input is
+   the wire, not a keyboard: virt has no PS/2, and the wire is the
+   substrate-neutral surface — the runner is the second
+   implementation of v1 frame-DECODE semantics (bad bytes counted in
+   its serial_bad_frames, state untouched; the Rust IAL emitter is
+   the second encoder).
+   **Measured: the canonical artifact produces the IDENTICAL
+   trajectory digest 0x211768a2 on x86 and on RISC-V** — same law,
+   second substrate, same digests, verbatim the decade-view demand —
+   and the portability gate now mints the same artifact twice in one
+   ledger, once per profile: the first non-reflexive portability
+   mint. The x86 kernel remains the only full kernel; the runner is
+   the law's portability proof.
 9. 🔬 **Integer-exact training** (decade view; research) — inference
    is portable by construction, training still pins the verifier to a
    BLAS via float BPTT. Retiring that float dependency would make S2
