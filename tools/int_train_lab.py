@@ -103,10 +103,31 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   29.9%, with late-run accuracy SUSTAINED at 25-27% and loss below
   every previous floor - refinement inside stability, the float
   control's behavior.
-  OPEN after four campaigns: rate/quality inside a now-stable
-  system. 29.9% vs control ~60% at h=128; next: these settings at
-  h=512 and longer horizons (the stable system can now absorb them),
-  then the integer-softmax loss as the remaining structural unknown.
+  FIFTH CAMPAIGN (2026-07-13) - WIDTH TRANSFER FAILS; two theories
+  falsified; the negative ledger:
+  h=512 with the winning h=128 recipe froze shifts at [1,0,0,0],
+  peaked 15% by ep500, and decayed to chance by ep1000 with the
+  thermostat holding norms perfectly flat - stability transferred,
+  learning did not (run killed at ep1000; the set-point mechanism is
+  width-independent, the failure is elsewhere). THEORY 1 (k=0 is a
+  degenerate hard-clip regime) FALSIFIED: the 29.9% h=128 run itself
+  freezes at [3,0,0,0] - reproduced bit-exactly post-revert, ks and
+  all. THEORY 2 (cold-start second moment explodes warmup norms;
+  cap the update as integer bias correction) produced real evidence
+  (freeze-0 norms grew 100-400x past set-points) but the cap CHANGED
+  THE WARMUP TRAJECTORY into a worse frozen regime (h=128
+  freeze-200: 29.9% -> 9.5%) and was reverted. Freeze-at-0 fails at
+  h=128 both ways (16.3% uncapped, 9.5% capped): the warmup
+  inflation is not a bug to remove - the system NEEDS to find its
+  equilibrium scale before k and the set-points lock.
+  OPEN after five campaigns: WHY width breaks learning while
+  stability holds. The warmup dynamics that select the frozen regime
+  are demonstrably decisive and demonstrably not understood -
+  INSTRUMENT FIRST (log alpha, k, violation and per-layer |g|
+  trajectories through warmup at h=128 vs h=512 and diff them)
+  before any further theory. 29.9% at h=128 stands as the
+  reproducible state of the art; the run that produces it is a pure
+  function of the seed.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -252,6 +273,7 @@ class IntLab:
         self.step_f = None
         self.norm_f = None
         self.lr0 = 0
+        self.freeze_at = FREEZE
         self.wd_f = 0
 
     def project(self):
@@ -414,6 +436,13 @@ class IntLab:
             # control converges on this same harness, the quantized
             # step does not).
             denom = int_isqrt(u) << A_GQ
+            # NOTE (fifth campaign): a trust-region cap on this update
+            # (min with step_q<<8) was tried to tame the cold-start
+            # second moment and REVERTED - it changes the warmup
+            # trajectory enough to freeze k in a different, worse
+            # regime (h=128 freeze-200 degraded 29.9% -> 9.5% with the
+            # cap). The warmup dynamics that select the frozen regime
+            # are not yet understood; instrument before re-theorizing.
             r += np.sign(m) * (((np.abs(m) * step_q) << 8)
                                // np.maximum(denom, 1))
             emit = np.sign(r) * (np.abs(r) >> 8)
@@ -453,7 +482,7 @@ class IntLab:
             if ep and ep % resample_every == 0:
                 X, cls = encode(gen_data(stream, ctx_per_key))
             signs, ks = self.project()
-            if self.frozen is None and ep == FREEZE:
+            if self.frozen is None and ep == self.freeze_at:
                 self.frozen = ks
                 # OU homeostasis: from here the step is FIXED at the
                 # freeze-time scale and shift-decay opposes diffusion.
@@ -569,6 +598,10 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
     ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
+    ap.add_argument("--freeze", type=int, default=FREEZE,
+                    help="epoch at which shifts, OU step and set-points "
+                         "freeze; 0 = stationary from init (no "
+                         "pre-freeze norm inflation)")
     ap.add_argument("--wd-shift", type=int, default=0,
                     help="weight decay as w -= |w|>>shift per step; 0=off")
     ap.add_argument("--save")
@@ -579,6 +612,7 @@ def main():
     lab = IntLab(h=args.h, r1=args.r1, r2=args.r2, seed=args.seed)
     lab.opt = args.opt
     lab.wd = args.wd_shift
+    lab.freeze_at = args.freeze
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)

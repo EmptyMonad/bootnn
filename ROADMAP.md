@@ -424,9 +424,18 @@ conversation. Order is deliberate.
    the step schedule stacked on top the lab doubled its best:
    15% (wall) → 23.8 (precision) → 25.9 (open-loop OU, taught us
    closed-loop) → 26.5 (thermostat) → **29.9%**, with late-run
-   accuracy sustained rather than peaked. Open: rate/quality inside
-   the now-stable system (h=512, longer horizons, integer softmax).
-   Two overflow traps ledgered in the lab docstring.
+   accuracy sustained rather than peaked. Fifth campaign
+   (2026-07-13): width transfer FAILS — h=512 with the winning
+   recipe peaks 15% then decays to chance while the thermostat holds
+   norms flat (stability transfers; learning does not), and two
+   explanatory theories were built and falsified the same day (k=0
+   regime degeneracy — the 29.9% run itself freezes there; and
+   cold-start second-moment explosion — the trust-region cap made
+   things worse and was reverted). The warmup dynamics that select
+   the frozen regime are decisive and not understood; the ledger
+   says INSTRUMENT FIRST before more theory. 29.9% at h=128 stands,
+   reproduced bit-exactly. Two overflow traps ledgered in the lab
+   docstring.
 
 ## Completed backlog (Tier 2/3 era)
 
