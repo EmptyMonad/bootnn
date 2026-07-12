@@ -294,8 +294,25 @@ conversation. Order is deliberate.
    stay generalist — letters cross leaves): leaf heldout 97.6/97.7%,
    composite 97.6% (≥95 gate), generalist baseline 99.8% on the same
    suite — at held width and smaller epoch budget, structure costs
-   ~2 points and buys plurality; the equal-total-params economics
-   test remains open.
+   ~2 points and buys plurality.
+   ✅ **Equal-params economics — SETTLED (2026-07-11,
+   `tools/s3_economics.py`)**: both spike confounds removed — 2
+   specialists at h=512, readout 608/232 (471,296 weights each,
+   942,592 total = 99.6% of the generalist's 946,176; specialists
+   argue from UNDER budget) trained at the generalist's own 10k-epoch
+   budget on scoped data. Result: leaf held-out 99.1% / 99.3%,
+   composite **99.1%** vs the canonical generalist's **99.8%** on the
+   identical suite — **GENERALIST HOLDS**. The spike's ~2-point
+   structure cost shrinks to 0.7 at matched budget but does not
+   invert, and the suite was scoped in the specialists' favor (they
+   trained only on it; the generalist also carries words and demo
+   sequences). Per the SWARM_DESIGN proxy — "if specialization
+   doesn't pay at N=2, it doesn't pay" — specialization is NOT a
+   quality play on this task at this scale. Plurality's remaining
+   case is operational: independent evolution, per-leaf verification
+   and replay cost, provisioned scopes, and contribution granularity
+   — not accuracy. Run is seeded and replayable (leaf CRCs
+   0x0b7a3af0/0xa70da96d, manifest 0x28f10717).
 6. ✅ **Intent compiler, reference + provision modes**
    (`tools/intent_compiler.py`, gated by `intent_test.py` in CI): a
    fixed interview compiles deterministically into a hash-chained

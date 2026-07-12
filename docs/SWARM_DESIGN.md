@@ -126,6 +126,19 @@ noted in Tier 3 OQ3).
   task suite, under the same gauntlet. If specialization doesn't pay
   at N=2, it doesn't pay.
 
+  > **Measured (2026-07-11, `tools/s3_economics.py`): it doesn't pay
+  > — on this task, at this scale.** With both spike confounds
+  > removed (equal total weights: 942,592 vs 946,176; equal epochs:
+  > 10k each), the routed composite scored 99.1% against the
+  > generalist's 99.8% on the identical suite, with the suite scoped
+  > in the specialists' favor. The inequality this section demanded
+  > is falsified at N=2 for accuracy. S3's surviving rationale is
+  > operational — independent leaf evolution, per-leaf verification
+  > and replay cost, provisioned scopes (the structural claim
+  > grammar), contribution granularity — and any future task mix
+  > heterogeneous enough to reopen the question must re-run this
+  > campaign, not argue with it.
+
 ## Dated assumptions this phase retires
 
 Recorded so the reasoning is explicit, in the spirit of Strategy B:
