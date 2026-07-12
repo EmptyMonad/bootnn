@@ -81,15 +81,32 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   decay as a shift (2^-11/step) slows but does not stop the
   norm-feedback divergence (peak 21.8%, then decay; --wd-shift, off
   by default).
-  OPEN after three campaigns: STABILITY, now ranked above precision.
-  Integer best 23.8% (norm-proportional sign-SGD, best-checkpoint
-  selection) vs float control ~60%. The recurring failure is the
-  norm/step feedback loop; candidate re-derivations rather than
-  knobs: normalize activations (integer layer-norm via shift) so the
-  law's scale is pinned instead of drifting, or a fixed absolute
-  step in law units (decouple step from mean|w| entirely, schedule
-  it like the shifts). An integer softmax (fixed-point exp table)
-  remains the loss-side unknown.
+  FOURTH CAMPAIGN (2026-07-13) - STABILITY SOLVED, by homeostasis:
+  the design think reframed the norm/step feedback correctly.
+  sign-SGD is an entropy pump: every confident weight moves a full
+  step even on pure noise, so the norm diffuses outward regardless
+  of signal. A decay that scales with the norm (like the step does)
+  gives a FIXED ratio of flows - no equilibrium exists, only a sign:
+  runaway or collapse. The counterbalance must create a restoring
+  force around a set-point.
+  Open-loop OU (fixed step + derived wd=2*lr_shift): new best 25.9%,
+  then COLLAPSE - RMS damping makes actual diffusion ratio*step <<
+  step, so the nominal-step-sized decay overpowers it; norms fell
+  ~10x below the frozen projection scale, the shadow left its
+  frozen-k regime, signal died, pure decay death-spiraled (the norm
+  trace in the logs exists because of this run).
+  CLOSED-LOOP THERMOSTAT: decay fires only while a layer's live norm
+  exceeds its freeze-time set-point. Collapse impossible by
+  construction, runaway opposed. Measured: norms flat to ~0.1% for
+  2500+ epochs, 26.5%. Step schedule stacked on top (previously dead
+  code against the frozen step; wired via the base-shift delta):
+  29.9%, with late-run accuracy SUSTAINED at 25-27% and loss below
+  every previous floor - refinement inside stability, the float
+  control's behavior.
+  OPEN after four campaigns: rate/quality inside a now-stable
+  system. 29.9% vs control ~60% at h=128; next: these settings at
+  h=512 and longer horizons (the stable system can now absorb them),
+  then the integer-softmax loss as the remaining structural unknown.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -232,6 +249,10 @@ class IntLab:
         self.frozen = None
         self.opt = "sign"
         self.wd = 0
+        self.step_f = None
+        self.norm_f = None
+        self.lr0 = 0
+        self.wd_f = 0
 
     def project(self):
         outs = [int_project(w, None if self.frozen is None
@@ -372,12 +393,18 @@ class IntLab:
             gq = np.clip(g >> A_GQ, -(1 << 28), 1 << 28)
             u -= u >> A_S2
             u += (gq * gq) >> A_S2
-            # Step tracks the live mean|w| (measured to climb ~50%
-            # faster than an init-frozen step: norm growth is part of
-            # how the ternary law finds its scale) - but unchecked it
-            # feeds back into divergence after ~1k epochs, so pair it
-            # with a decay schedule (--decay-every).
-            step_q = max((int(np.abs(w).sum()) // w.size) >> lr_shift, 1)
+            # Before the freeze: step tracks the live mean|w| (climbs
+            # ~50% faster; norm growth is how the ternary law finds
+            # its scale). After: the OU regime - fixed step (set at
+            # freeze) + restoring decay below.
+            if self.step_f is not None:
+                # The decay schedule applies to the frozen step too:
+                # lr_shift arrives schedule-incremented, so the excess
+                # over the base shift scales the step down.
+                step_q = max(self.step_f[i] >> (lr_shift - self.lr0), 1)
+            else:
+                step_q = max((int(np.abs(w).sum()) // w.size)
+                             >> lr_shift, 1)
             # ERROR FEEDBACK: the desired update is computed in fine
             # units (8 extra fractional bits) and accumulated in a
             # residual; whole quanta are emitted, the remainder is
@@ -392,12 +419,20 @@ class IntLab:
             emit = np.sign(r) * (np.abs(r) >> 8)
             r -= emit << 8
             w -= emit
-            # Weight decay as a shift (integer L2), opt-in: at 2^-11
-            # it slows but does not stop the norm-feedback divergence
-            # (measured: peak 21.8% then decay) - kept as a lever, off
-            # by default.
-            if self.wd:
-                w -= np.sign(w) * (np.abs(w) >> self.wd)
+            # Restoring drift as a CLOSED-LOOP thermostat: decay fires
+            # only while the layer's live norm exceeds its freeze-time
+            # set-point. Open-loop balance (decay always on) was
+            # measured to collapse layer norms ~10x below the frozen
+            # projection scale - RMS damping makes actual diffusion
+            # ratio*step << step, so a decay sized to the nominal step
+            # overpowers it, the shadow leaves its frozen-k regime,
+            # signal dies, and pure decay death-spirals. Below the
+            # set-point the pump switches off: collapse is impossible
+            # by construction; above it, runaway is opposed.
+            wd = self.wd or (self.wd_f if self.step_f is not None else 0)
+            if wd and self.step_f is not None and \
+               int(np.abs(w).sum()) // w.size > self.norm_f[i]:
+                w -= np.sign(w) * (np.abs(w) >> wd)
 
     def accuracy(self, X, cls, signs, ks):
         acc, _ = self.forward(X, signs, ks)
@@ -409,6 +444,7 @@ class IntLab:
 
     def train(self, epochs, lr_shift, ctx_per_key=8, seed_data=777,
               resample_every=25, log_every=50, decay_every=0):
+        self.lr0 = lr_shift
         val_X, val_cls = encode(gen_data(XorShift(seed_data + 1), 6))
         stream = XorShift(seed_data)
         X, cls = encode(gen_data(stream, ctx_per_key))
@@ -419,7 +455,22 @@ class IntLab:
             signs, ks = self.project()
             if self.frozen is None and ep == FREEZE:
                 self.frozen = ks
-                print(f"  epoch {ep}: shifts frozen at {ks}")
+                # OU homeostasis: from here the step is FIXED at the
+                # freeze-time scale and shift-decay opposes diffusion.
+                # sign-SGD injects norm like an entropy pump (constant
+                # step even on pure noise); a restoring drift
+                # proportional to |w| gives each weight a stationary
+                # Ornstein-Uhlenbeck distribution instead of a
+                # runaway, with equilibrium |w|* ~ step << (wd/2)
+                # pinned to the norm the frozen projection shifts
+                # were derived from.
+                norms = [int(np.abs(w).sum()) // w.size for w in self.w]
+                self.step_f = [max(n >> lr_shift, 1) for n in norms]
+                self.norm_f = norms          # the homeostatic set-point
+                self.wd_f = 2 * lr_shift
+                print(f"  epoch {ep}: shifts frozen at {ks}; OU step "
+                      f"{self.step_f}, decay shift {self.wd_f}, "
+                      f"set-point norms {[n >> 14 for n in norms]}")
             g, _, n_wrong, loss = self.grads(X, cls, signs, ks)
             # sign-SGD converges to a noise ball proportional to the
             # step; a stepped shift schedule (integer, deterministic)
@@ -436,9 +487,11 @@ class IntLab:
                             == val_cls).mean())
                 if va > best:
                     best, best_w = va, [w.copy() for w in self.w]
+                norms = [int(np.abs(w).sum()) // w.size for w in self.w]
                 print(f"  epoch {ep:5d}: loss={loss:>12}  "
                       f"violations={n_wrong:4d}  law={va * 100:5.1f}%  "
-                      f"shadow={sa * 100:5.1f}%  best={best * 100:5.1f}%",
+                      f"shadow={sa * 100:5.1f}%  best={best * 100:5.1f}%  "
+                      f"norm={[n >> 14 for n in norms]}",
                       flush=True)
         if best_w is not None:
             self.w = best_w

@@ -414,12 +414,19 @@ conversation. Order is deliberate.
    integer Newton isqrt produced the first control-like
    margin-satisfaction structure (violations below the eternal 105);
    weight decay slows but does not stop the norm-feedback
-   divergence. Still open after three campaigns: STABILITY — integer
-   best 23.8% vs control ~60%; the recurring failure is the
-   norm/step feedback loop, and the named re-derivations (not knobs)
-   are integer layer-norm to pin the law's scale, a fixed absolute
-   step in law units, or an integer-softmax loss. Two overflow traps
-   are ledgered in the lab docstring for whoever continues.
+   divergence. Fourth campaign (2026-07-13): **stability solved by
+   homeostasis** — sign-SGD is an entropy pump (constant-step
+   diffusion even at zero signal), and any decay scaling with the
+   norm gives a fixed flow ratio with no equilibrium; the fix is a
+   closed-loop thermostat, decay firing only above each layer's
+   freeze-time set-point norm. Measured: layer norms flat to ~0.1%
+   for 2500+ epochs, collapse impossible by construction, and with
+   the step schedule stacked on top the lab doubled its best:
+   15% (wall) → 23.8 (precision) → 25.9 (open-loop OU, taught us
+   closed-loop) → 26.5 (thermostat) → **29.9%**, with late-run
+   accuracy sustained rather than peaked. Open: rate/quality inside
+   the now-stable system (h=512, longer horizons, integer softmax).
+   Two overflow traps ledgered in the lab docstring.
 
 ## Completed backlog (Tier 2/3 era)
 
