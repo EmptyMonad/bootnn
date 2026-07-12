@@ -8,8 +8,13 @@ An append-only, hash-chained event log where:
     (account, seed, epochs, lr, claimed_crc) — "I ran this training
     and got this blob" — or a STRUCTURAL claim (op=create_leaf,
     grammar in s3_forest.validate_structure): "I carved this scope
-    into a new leaf and got this blob AND this composite commitment".
-    Weights and architecture are both pure functions of the log;
+    into a new leaf and got this blob AND this composite commitment" —
+    or a PORTABILITY claim (op=portability, grammar in
+    portability.validate_portability): "this artifact computes the law
+    on this hardware profile", verified by booting the named profile
+    and minted once per (artifact, profile) pair.
+    Weights, architecture, and substrate coverage are all pure
+    functions of the log;
   - a *verdict* is produced by replaying the claim: rerun train.py
     with the tuple, CRC32 the output, compare. Verification IS
     deterministic replay — no committee, no proof system, binary;
@@ -49,6 +54,10 @@ ROOT = Path(__file__).resolve().parent.parent
 TRAIN = ROOT / "tools" / "train.py"
 
 MINT_PER_VERIFIED_CLAIM = 100
+# The hardware-profile reward class: verified coverage of one
+# (artifact, profile) pair mints once - substrate coverage is a
+# contribution, but the same coverage twice is worth nothing.
+MINT_PER_PORTABILITY = 100
 GENESIS = "dnos-ledger-v0"
 
 
@@ -87,6 +96,7 @@ class Ledger:
         claims = {}
         verdicted = set()
         leaves_spent = set()
+        covered = set()
         prev = GENESIS
         for e in self.entries:
             if e["prev"] != prev or \
@@ -130,9 +140,20 @@ class Ledger:
                 else:
                     verdicted.add(ci)
                     if d["verified"]:
-                        acct = claims[ci]["account"]
-                        balances[acct] = balances.get(acct, 0) \
-                            + MINT_PER_VERIFIED_CLAIM
+                        c = claims[ci]
+                        acct = c["account"]
+                        if c.get("op") == "portability":
+                            # Coverage mints once per (artifact,
+                            # profile) - even a forged duplicate
+                            # verdict buys nothing at the fold.
+                            pair = (c["artifact_crc"], c["profile"])
+                            if pair not in covered:
+                                covered.add(pair)
+                                balances[acct] = balances.get(acct, 0) \
+                                    + MINT_PER_PORTABILITY
+                        else:
+                            balances[acct] = balances.get(acct, 0) \
+                                + MINT_PER_VERIFIED_CLAIM
             elif e["type"] == "transfer":
                 src, dst, amt = d["src"], d["dst"], d["amount"]
                 if amt <= 0 or balances.get(src, 0) < amt:
@@ -360,12 +381,36 @@ def main():
                    help="optional persistent Merkle-Lamport authorship "
                         "(never gates reward)")
 
+    p = sub.add_parser("submit-portability",
+                       help="record a hardware-profile coverage claim: "
+                            "this artifact computes the law on this "
+                            "profile")
+    p.add_argument("--account", required=True)
+    p.add_argument("--artifact", required=True,
+                   help="path to the v5 blob the claim covers")
+    p.add_argument("--profile", required=True,
+                   help="profile id (see portability.PROFILES)")
+    p.add_argument("--probe", default="pblofc",
+                   help="probe event log, qcode-safe [a-z0-9]")
+    p.add_argument("--claimed-digest",
+                   help="trajectory digest measured on the profile "
+                        "(hex ok); omit with --measure")
+    p.add_argument("--measure", action="store_true",
+                   help="boot the profile now and measure the digest "
+                        "instead of passing --claimed-digest")
+    p.add_argument("--author-seed",
+                   help="optional persistent Merkle-Lamport authorship "
+                        "(never gates reward)")
+
     p = sub.add_parser("verify", help="replay a claim and record the verdict")
     p.add_argument("--claim", type=int, required=True)
     p.add_argument("--min-heldout", type=float, default=MINT_MIN_HELDOUT,
                    help="quality bar: honest replays mint only at or "
                         "above this held-out accuracy (policy knob, "
                         "recorded in the verdict)")
+    p.add_argument("--artifact", default=str(ROOT / "weights_ssm.bin"),
+                   help="artifact file for portability claims (its CRC "
+                        "must match the claim's artifact_crc)")
 
     p = sub.add_parser("transfer")
     p.add_argument("--src", required=True)
@@ -416,6 +461,29 @@ def main():
         print(f"[ledger] structural claim recorded as entry {e['idx']} "
               f"(create_leaf {args.leaf}, scope {args.scope!r})")
 
+    elif args.cmd == "submit-portability":
+        sys.path.insert(0, str(ROOT / "tools"))
+        import portability
+        acrc = crc32(Path(args.artifact).read_bytes()) & 0xFFFFFFFF
+        data = {"account": args.account, "op": "portability",
+                "artifact_crc": acrc, "profile": args.profile,
+                "probe": args.probe}
+        if args.measure:
+            _, d = portability.metal_trajectory(args.profile,
+                                                args.artifact, args.probe)
+            data["claimed_digest"] = d
+        elif args.claimed_digest:
+            data["claimed_digest"] = int(args.claimed_digest, 0)
+        else:
+            sys.exit("ERROR: pass --claimed-digest or --measure")
+        reason = portability.validate_portability(data)
+        if reason is not None:
+            sys.exit(f"ERROR: portability claim refused: {reason}")
+        e = led.append("claim", data, author_seed=args.author_seed)
+        print(f"[ledger] portability claim recorded as entry {e['idx']} "
+              f"(artifact {acrc:#010x} on {args.profile}, digest "
+              f"{data['claimed_digest']:#010x})")
+
     elif args.cmd == "verify":
         claim = next((e["data"] for e in led.entries
                       if e["idx"] == args.claim and e["type"] == "claim"),
@@ -427,6 +495,60 @@ def main():
                e["data"]["claim_idx"] == args.claim:
                 sys.exit(f"ERROR: claim {args.claim} already has a "
                          f"verdict (entry {e['idx']}) - not replaying")
+        if claim.get("op") == "portability":
+            sys.path.insert(0, str(ROOT / "tools"))
+            import portability
+            reason = portability.validate_portability(claim)
+            if reason is None:
+                # Coverage already minted for this pair? Deterministic
+                # from the log; settled without booting anything.
+                claims_by_idx = {e["idx"]: e["data"] for e in led.entries
+                                 if e["type"] == "claim"}
+                for e in led.entries:
+                    if e["type"] != "verdict" or \
+                       not e["data"].get("verified"):
+                        continue
+                    c2 = claims_by_idx.get(e["data"]["claim_idx"], {})
+                    if c2.get("op") == "portability" and \
+                       c2["artifact_crc"] == claim["artifact_crc"] and \
+                       c2["profile"] == claim["profile"]:
+                        reason = "coverage already minted for this pair"
+                        break
+            if reason is not None:
+                led.append("verdict", {"claim_idx": args.claim,
+                                       "verified": False,
+                                       "replay_ok": False,
+                                       "reason": reason})
+                print(f"[ledger] portability claim {args.claim}: -> "
+                      f"REJECTED ({reason})")
+                return
+            acrc = crc32(Path(args.artifact).read_bytes()) & 0xFFFFFFFF
+            if acrc != claim["artifact_crc"]:
+                sys.exit(f"ERROR: artifact {args.artifact} has crc "
+                         f"{acrc:#010x}, claim covers "
+                         f"{claim['artifact_crc']:#010x} - not verdictable "
+                         f"with this file")
+            replay_ok, law_ok, metal_d, law_d = \
+                portability.verify_portability(claim, args.artifact)
+            verified = bool(replay_ok and law_ok)
+            led.append("verdict", {"claim_idx": args.claim,
+                                   "verified": verified,
+                                   "replay_ok": replay_ok,
+                                   "law_ok": law_ok,
+                                   "computed_digest": metal_d,
+                                   "law_digest": law_d})
+            if verified:
+                outcome = (f"VERIFIED (metal == claim == law, "
+                           f"{metal_d:#010x}; coverage minted, "
+                           f"+{MINT_PER_PORTABILITY})")
+            elif not replay_ok:
+                outcome = (f"REJECTED (dishonest: metal {metal_d:#010x} "
+                           f"!= claimed {claim['claimed_digest']:#010x})")
+            else:
+                outcome = (f"REJECTED (profile diverges from law: metal "
+                           f"{metal_d:#010x} != law {law_d:#010x})")
+            print(f"[ledger] portability claim {args.claim}: -> {outcome}")
+            return
         if claim.get("op") == "create_leaf":
             replay_ok, leaf_crc, mcrc, heldout, reason = \
                 verify_structure(claim, led.entries)

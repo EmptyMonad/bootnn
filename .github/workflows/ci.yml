@@ -85,6 +85,9 @@ jobs:
       - name: Structural claim gate (create_leaf - architecture is a fold over the log)
         run: python3 tools/structure_test.py
 
+      - name: Portability gate (S2 - substrate coverage mints once per pair)
+        run: python3 tools/portability_test.py
+
       - name: Intent compiler gate (config is law, conversation is ephemeral)
         run: python3 tools/intent_test.py
 

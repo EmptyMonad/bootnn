@@ -338,15 +338,24 @@ conversation. Order is deliberate.
    provision. Original vision (NL interview host-side) unchanged: NL
    interview → canonical config event log → deterministic client/shell
    configuration; the conversation is ephemeral, the log is law.
-7. 📋 **S2 hardware-profile reward class (portability mints)** — the
-   last named S2 remainder. Sketch: a portability claim is
-   (artifact_crc, profile_id, probe event log, claimed trajectory
-   digest); verification replays the probe log on the named profile
-   and compares digests (QEMU-TCG-x86 is profile 0 — the harness
-   generalizes interactive_test's QMP differential); the fold mints
-   once per (artifact, profile) pair, uniqueness enforced like double
-   verdicts. Do the pre-code analysis in a QEMU-capable session — the
-   gate cannot be developed blind.
+7. ✅ **S2 hardware-profile reward class — portability mints
+   (2026-07-12, `tools/portability.py` + `portability_test.py`, in
+   CI)**: a portability claim is (artifact_crc, profile id, inline
+   probe event log, claimed trajectory digest over per-key
+   (key, last_cmd, h_crc) — working memory included). Verification
+   replays the probe on the NAMED profile (patch artifact into a copy
+   of the image at the weight sector, boot, drive keys over QMP) and
+   demands two equalities: **honesty** (metal == claimed) and
+   **faithfulness** (metal == the simulator's prediction — the law is
+   the reference; a substrate that boots but diverges from the law
+   covers nothing). The fold mints once per (artifact, profile) pair
+   — a duplicate claim is rejected without booting, and even a forged
+   duplicate verified verdict mints nothing (negative-tested). The
+   profile table is the verifier's capability list (qemu-tcg-x86
+   today); a RISC-V port becomes a table entry + boot recipe — the
+   grammar and digests don't change. Gate runs 3 boots (~40 s):
+   grammar refusals, two independent boots agreeing bit-exactly,
+   dishonest digest exposed, uniqueness, law-divergence wiring.
 8. 📋 **RISC-V second hardware profile** (decade view) — what makes
    the portability mint real rather than reflexive: the same law, a
    second substrate, the same digests.
