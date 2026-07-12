@@ -398,9 +398,23 @@ conversation. Order is deliberate.
    — sign-SGD + Weston-Watkins hinge learns (loss −50%) but plateaus
    at ~3× chance, invariant to width, step size, schedule, and loss
    density, so the float trainer's remaining edge is optimizer
-   ADAPTIVITY, not float arithmetic. Next lever, not yet run:
-   integer Adam (exact isqrt; per-weight shift scaling from
-   bit_length) or integer softmax via fixed-point exp table.
+   ADAPTIVITY, not float arithmetic — **revised by the second
+   campaign (same day)**: it wasn't adaptivity either. A float
+   CONTROL ARM on the identical harness (`int_train_control.py`,
+   committed as the lab's diagnostic reference) converged to ~60%
+   where every integer optimizer — sign-SGD, integer Adam-flavour,
+   error feedback — sat at exactly 15%, which localized the wall to
+   the integer range-control shifts: sized to worst-case bounds,
+   they left 2–5 bits of gradient after cancellation (typical
+   magnitudes are sqrt-scale, not bound-scale). Quantization noise
+   is optimizer-invariant — which is what the plateau's invariance
+   had been saying all along. Re-sizing shifts to typical magnitudes
+   broke the wall (15% → 23.8%, loss monotone through the old
+   floor). Still open: rate — integer 23.8% vs control ~60% at
+   matched epochs; next levers in suspected order: extra fractional
+   bits through the remaining >>8 hop, RMS second moment via exact
+   isqrt, weight-decay-as-shift so the faster norm-proportional step
+   can run without its measured ~1k-epoch divergence.
 
 ## Completed backlog (Tier 2/3 era)
 

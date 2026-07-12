@@ -50,15 +50,30 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   integer LARS is a trap - floor division zeroes every sub-peak
   update (median |g| ~2^15 vs peaks ~2^40), silently freezing almost
   all weights; (c) post-sum shifts silently break batch linearity.
-  OPEN: convergence quality. sign-SGD + WW-hinge demonstrably learns
-  (hinge loss -50%) but plateaus at ~3x chance (best 16.3%),
-  INVARIANT to width (128 vs 512), step size (4 settings), stepped
-  decay, and loss density. The float trainer's remaining advantage is
-  therefore optimizer ADAPTIVITY (Adam's per-parameter scaling)
-  and/or softmax's calibrated gradients - NOT float arithmetic.
-  Named next lever (not yet run): integer Adam - isqrt is exact and
-  deterministic; second-moment scaling can be a per-weight shift from
-  bit_length - or an integer softmax via fixed-point exp table.
+  FIRST CAMPAIGN'S DEAD END, RESOLVED BY CONTROL ARM (2026-07-12,
+  second campaign, tools/int_train_control.py): the universal 15%
+  plateau was NOT the optimizer - integer Adam-flavour (m=EMA(g),
+  u=EMA|g|, per-weight (m*step)//u) and error feedback both hit the
+  identical wall, while the float control (same harness, same hinge,
+  same backward SHAPE) sailed to ~60%. Elimination localized the
+  defect: range-control shifts sized to worst-case BOUNDS destroyed
+  the gradient - random-sign cancellation makes typical magnitudes
+  sqrt-scale (2^13..2^16), so >>15 twice left 2-5 bits of signal.
+  Quantization noise is optimizer-invariant; that is exactly what the
+  invariance of the plateau was saying.
+  Re-sizing the shifts to typical magnitudes (dz2 unshifted, >>8
+  elsewhere; int64 headroom verified) BROKE the wall: 15% -> 23.8%,
+  loss monotone through the old floor. Second-order finding: a step
+  proportional to live mean|w| climbs ~50% faster than an init-frozen
+  step (norm growth is part of how the ternary law finds its scale)
+  but feeds back into divergence after ~1k epochs; best-checkpoint
+  selection preserves the peak through it.
+  OPEN: rate. Integer best 23.8% vs float control ~60% at comparable
+  epochs - remaining levers, in suspected order: carry extra
+  fractional bits through the dz1 >>8 hop (signal precision, the
+  proven lever's continuation); RMS second moment via exact isqrt
+  (m/EMA|g| under-damps spiky weights); norm control (weight decay as
+  a shift) to let the fast proportional step run without divergence.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -84,6 +99,8 @@ OUT = 64
 N_CMD = 20
 MARGIN = 1024               # hinge margin, in pre-sigmoid acc units
 MU_S = 3                    # momentum = 1 - 2^-3 = 0.875, as a shift
+A_S1 = 3                    # adam: first-moment EMA shift (beta1 ~ 0.875)
+A_S2 = 6                    # adam: |g|-moment EMA shift (beta2 ~ 0.984)
 FREEZE = 200                # epochs before per-layer shifts freeze
 MASK64 = (1 << 64) - 1
 
@@ -173,7 +190,11 @@ class IntLab:
                              for _ in range(fi)], dtype=np.int64)
         self.w = [init(8, h), init(h, r1), init(r1, r2), init(r2, OUT)]
         self.v = [np.zeros_like(w) for w in self.w]
+        self.u = [np.zeros_like(w) for w in self.w]
+        self.r = [np.zeros_like(w) for w in self.w]   # error feedback
+        self.step0 = [int(np.abs(w).sum()) // w.size for w in self.w]
         self.frozen = None
+        self.opt = "sign"
 
     def project(self):
         outs = [int_project(w, None if self.frozen is None
@@ -257,12 +278,16 @@ class IntLab:
             (MARGIN << k) - (zy[:, None] - logits), 0)
             * viol).sum()) >> k
         # Range-control shifts are PER-SAMPLE (before any batch
-        # reduction): floor-shift after a sum is not linear in the
-        # batch, and chunk-exactness is a gate.
-        d3 = z2.T @ (g >> 15)
-        dz2 = ((g @ signs[3].T) >> 15) * m2
+        # reduction; post-sum floor-shift breaks chunk linearity - a
+        # gate) and sized to TYPICAL magnitudes, not worst-case
+        # bounds: random-sign cancellation makes typical values
+        # sqrt-scale, and over-shifting (>>15 everywhere) was measured
+        # to leave 2-5 bits of gradient - quantization noise that no
+        # optimizer could rescue. int64 headroom holds at these:
+        d3 = z2.T @ (g >> 8)
+        dz2 = (g @ signs[3].T) * m2
         d2 = z1.T @ dz2
-        dz1 = ((dz2 @ signs[2].T) >> 15) * m1
+        dz1 = ((dz2 @ signs[2].T) >> 8) * m1
         d1 = h.T @ dz1
         dh = dz1 @ signs[1].T
         # BPTT: the recurrence backward is the decay spectrum itself.
@@ -285,6 +310,43 @@ class IntLab:
             v += g
             step_q = max((int(np.abs(w).sum()) // w.size) >> lr_shift, 1)
             w -= np.sign(v) * step_q
+
+    def step_adam(self, grads, lr_shift):
+        """Integer Adam-flavour: per-weight adaptivity without squares
+        or roots (g^2 overflows int64 at our scales; Adam's actual
+        mechanism is sign-consistency scaling). m = EMA(g), u =
+        EMA(|g|), both leaky shifts with the (1-beta) factor included
+        so each is a true average; |m| <= u by construction, so the
+        per-weight update sign(m) * (|m| * step) // u is bounded by
+        step = mean|w| >> lr_shift. A weight with a consistent
+        gradient direction moves the full step; a noisy one barely
+        moves. Exact integer division, sign-symmetric (no floor bias),
+        deterministic."""
+        for i, (w, m, u, r, g) in enumerate(
+                zip(self.w, self.v, self.u, self.r, grads)):
+            m -= m >> A_S1
+            m += g >> A_S1
+            u -= u >> A_S2
+            u += np.abs(g) >> A_S2
+            # Step tracks the live mean|w| (measured to climb ~50%
+            # faster than an init-frozen step: norm growth is part of
+            # how the ternary law finds its scale) - but unchecked it
+            # feeds back into divergence after ~1k epochs, so pair it
+            # with a decay schedule (--decay-every).
+            step_q = max((int(np.abs(w).sum()) // w.size) >> lr_shift, 1)
+            # ERROR FEEDBACK: the desired update is computed in fine
+            # units (8 extra fractional bits) and accumulated in a
+            # residual; whole quanta are emitted, the remainder is
+            # never lost. This is float's fractional accumulation,
+            # exactly, in integers - without it, sub-quantum updates
+            # vanish and most weights starve (measured: the float
+            # control converges on this same harness, the quantized
+            # step does not).
+            r += np.sign(m) * (((np.abs(m) * step_q) << 8)
+                               // np.maximum(u, 1))
+            emit = np.sign(r) * (np.abs(r) >> 8)
+            r -= emit << 8
+            w -= emit
 
     def accuracy(self, X, cls, signs, ks):
         acc, _ = self.forward(X, signs, ks)
@@ -312,7 +374,10 @@ class IntLab:
             # step; a stepped shift schedule (integer, deterministic)
             # shrinks the ball. decay_every=0 disables.
             sh = lr_shift + (ep // decay_every if decay_every else 0)
-            self.step(g, min(sh, lr_shift + 4))
+            if self.opt == "adam":
+                self.step_adam(g, min(sh, lr_shift + 4))
+            else:
+                self.step(g, min(sh, lr_shift + 4))
             if ep % log_every == 0 or ep == epochs - 1:
                 va = self.accuracy(val_X, val_cls, signs, ks)
                 sacc, _ = self.forward_train(val_X, signs, ks)
@@ -399,12 +464,14 @@ def main():
                          "momentum buffer")
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
+    ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
     ap.add_argument("--save")
     args = ap.parse_args()
     if args.gate:
         gate()
         return
     lab = IntLab(h=args.h, r1=args.r1, r2=args.r2, seed=args.seed)
+    lab.opt = args.opt
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
