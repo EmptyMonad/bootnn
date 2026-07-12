@@ -74,7 +74,37 @@ def grammar():
     refused("non-empty", probe="")
     refused("qcode-safe", probe="p+b")
     refused("missing field", claimed_digest=None)
+    # Coverage floor: a probe that grazes one key certifies nothing.
+    refused("coverage floor", probe="ppp")
+    refused("coverage floor", probe="xyz123")
     print("[portability_test] grammar: malformed claims refused, no boot")
+
+
+def topology_guard(tmp):
+    """A blob the substrate cannot run is refused fast and legibly,
+    BEFORE any boot (the x86 kernel would halt red; the harness names
+    the reason instead)."""
+    import numpy as np
+    from ssm_lab import SsmLab
+    np.random.seed(1)
+    lab = SsmLab(h=512, seed=1, r1=608, r2=232)   # econ-harness topology
+    p = tmp / "nonstd.bin"
+    lab.save(str(p))
+    try:
+        portability.metal_trajectory("qemu-tcg-x86", p, PROBE)
+        raise AssertionError("x86 profile accepted a non-canonical "
+                             "topology")
+    except SystemExit as ex:
+        assert "topology" in str(ex), ex
+    # The rv runner reads topology from the header - 608/232 is inside
+    # its caps, so the same blob is riscv-runnable (asserted here at
+    # the guard level only; its faithfulness is the mint's business).
+    try:
+        portability._check_topology("qemu-tcg-riscv32-virt", p)
+    except SystemExit as ex:
+        raise AssertionError(f"riscv guard refused a runnable blob: {ex}")
+    print("[portability_test] topology guard: substrate limits named "
+          "before boot, per profile")
 
 
 def honest_and_dishonest(tmp):
@@ -201,6 +231,7 @@ def main():
                  "tools/build.py first")
     tmp = Path(tempfile.mkdtemp())
     grammar()
+    topology_guard(tmp)
     faithfulness_wiring()
     led_path, measured = honest_and_dishonest(tmp)
     uniqueness(tmp, led_path, measured)

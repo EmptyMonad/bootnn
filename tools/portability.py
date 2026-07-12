@@ -69,6 +69,17 @@ RV_MAGIC = 0x52564E44
 
 PROBE_SAFE = set("abcdefghijklmnopqrstuvwxyz0123456789")
 
+# Coverage is only as deep as the probe: a claim whose probe grazes
+# one key certifies almost nothing. Policy floor - the probe must
+# exercise at least this many DISTINCT trigger keys (keys the law maps
+# to commands), so a mint always covers a real slice of behavior.
+MIN_PROBE_TRIGGERS = 6
+
+
+def _trigger_keys():
+    from ssm_lab import SINGLE_KEYS
+    return {k for k, _ in SINGLE_KEYS}
+
 
 def validate_portability(data):
     """The grammar. None for a well-formed portability claim, else the
@@ -83,10 +94,38 @@ def validate_portability(data):
         return "probe must be a non-empty event string"
     if not set(probe) <= PROBE_SAFE:
         return "probe keys must be qcode-safe [a-z0-9]"
+    n_triggers = len(set(probe) & _trigger_keys())
+    if n_triggers < MIN_PROBE_TRIGGERS:
+        return (f"probe exercises {n_triggers} distinct trigger keys; "
+                f"coverage floor is {MIN_PROBE_TRIGGERS}")
     for f in ("artifact_crc", "claimed_digest"):
         if f not in data:
             return f"missing field: {f}"
     return None
+
+
+# What each profile's SUBSTRATE can actually run. The x86 kernel's
+# buffers are compiled for the canonical topology (its own
+# validate_weights rejects anything else at boot - this check just
+# fails fast and legibly, before a boot that would halt red). The rv
+# runner reads topology from the header but its h block and the
+# digest domain are 512 channels, and its readout buffers cap r1/r2.
+X86_TOPOLOGY = (8, 512, 1024, 384, 64)
+
+
+def _check_topology(profile_id, artifact_path):
+    import struct
+    hdr = Path(artifact_path).read_bytes()[:16]
+    if hdr[:2] != b"DN" or hdr[2] != 5:
+        sys.exit(f"ERROR: {artifact_path} is not a v5 blob")
+    sizes = struct.unpack_from("<HHHHH", hdr, 5)
+    if profile_id == "qemu-tcg-x86" and sizes != X86_TOPOLOGY:
+        sys.exit(f"ERROR: topology {sizes} is not runnable on "
+                 f"{profile_id} (kernel is compiled for {X86_TOPOLOGY})")
+    if profile_id == "qemu-tcg-riscv32-virt" and \
+       (sizes[1] != 512 or sizes[2] > 1024 or sizes[3] > 512):
+        sys.exit(f"ERROR: topology {sizes} is not runnable on "
+                 f"{profile_id} (h must be 512; readout caps 1024/512)")
 
 
 def _h_crc(h):
@@ -121,6 +160,7 @@ def metal_trajectory(profile_id, artifact_path, probe, port=55670,
     drive the probe, read (last_cmd, h_crc) after each key over QMP.
     Returns (records, digest). Each profile is a boot recipe; the
     digest domain is identical across profiles - that is the claim."""
+    _check_topology(profile_id, artifact_path)
     if profile_id == "qemu-tcg-riscv32-virt":
         return _riscv_trajectory(artifact_path, probe, port, qemu)
     return _x86_trajectory(profile_id, artifact_path, probe, port, qemu)
