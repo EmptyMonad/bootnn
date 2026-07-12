@@ -144,12 +144,13 @@ class ForestMachine:
 
 def manifest_of(table, leaf_crcs):
     """The composite law: canonical JSON committing to router + leaves.
-    Its CRC is DERIVED from parts - there is no monolithic artifact."""
+    Its CRC is DERIVED from parts - there is no monolithic artifact.
+    The commitment goes through manifest_crc (the single serialization
+    authority) so builder and verifier can never disagree on the bytes."""
     m = {"router_version": table["version"],
          "scopes": table["scopes"], "fallback_mod": table["fallback_mod"],
          "leaves": [{"leaf": i, "crc": c} for i, c in enumerate(leaf_crcs)]}
-    blob = json.dumps(m, sort_keys=True, separators=(",", ":"))
-    return m, crc32(blob.encode()) & 0xFFFFFFFF
+    return m, manifest_crc(m)
 
 
 def manifest_for(blobs, table=None):
@@ -208,6 +209,13 @@ def validate_structure(data, prior_manifest_crc=None):
         return "base_manifest must be carried inline"
     if manifest_crc(base) != data.get("base_manifest_crc"):
         return "base_manifest does not hash to base_manifest_crc"
+    if not isinstance(base.get("scopes"), list) or \
+       "fallback_mod" not in base:
+        # A validator returns the reason it refuses; it never raises.
+        # An old-schema (draw_keys/motion_keys) or malformed manifest
+        # that happens to hash consistently is refused here, not on a
+        # KeyError three lines down.
+        return "base_manifest is not the current schema (no scopes)"
     if prior_manifest_crc is not None and \
        data["base_manifest_crc"] != prior_manifest_crc:
         return "claim does not chain to the last verified structure"

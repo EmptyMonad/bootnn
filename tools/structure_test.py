@@ -90,13 +90,22 @@ def grammar(m):
     refused("trainable trigger", scope=["z"])
     tampered = dict(m, router_version=99)
     refused("does not hash", base_manifest=tampered)
+    # An OLD-schema manifest (draw_keys/motion_keys, no scopes) that
+    # hashes consistently to its own crc must be REFUSED, not crash the
+    # validator with a KeyError - a validator returns reasons.
+    old_schema = {"router_version": 1, "draw_keys": ["p"],
+                  "motion_keys": ["w"]}
+    r = s3_forest.validate_structure(
+        dict(good, base_manifest=old_schema,
+             base_manifest_crc=s3_forest.manifest_crc(old_schema)))
+    assert r and "scopes" in r, f"old-schema manifest not refused: {r!r}"
     incomplete = dict(good)
     del incomplete["claimed_crc"]
     r = s3_forest.validate_structure(incomplete)
     assert r and "missing field" in r, r
     r = s3_forest.validate_structure(good, prior_manifest_crc=123)
     assert r and "chain" in r, r
-    print("[structure] grammar: 9 malformed claims refused, each with "
+    print("[structure] grammar: 10 malformed claims refused, each with "
           "its reason")
 
 

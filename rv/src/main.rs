@@ -58,6 +58,15 @@ const DEMO_KEYS: &[u8] = b"pboxline"; // must match src/dnos.asm
 
 const H_MAX: usize = 512;
 const N_CMD: usize = 20;
+// Substrate limits: the readout buffers (z1/z2 below) and the drive
+// loop are sized for these. The runner is self-validating like the
+// x86 kernel's validate_weights - a blob past any bound is REFUSED
+// (hdr_status=2), never run into an out-of-bounds panic that would
+// hang looking healthy.
+const FEAT_MAX: usize = 8; // key is u8: `key >> i` needs i < 8
+const R1_MAX: usize = 1024;
+const R2_MAX: usize = 512;
+const N_OUT_MAX: usize = 64;
 
 #[inline(always)]
 fn rd8(a: u32) -> u8 {
@@ -130,7 +139,15 @@ fn parse_and_validate() -> Option<Law> {
     }
     let sz = |i: u32| -> usize { rd16(BLOB_BASE + 5 + 2 * i) as usize };
     let (n_in, h, r1, r2, n_out) = (sz(0), sz(1), sz(2), sz(3), sz(4));
-    if h == 0 || h > H_MAX || n_in > 32 || n_out == 0 || n_out > 64 {
+    if h == 0
+        || h > H_MAX
+        || n_in == 0
+        || n_in > FEAT_MAX
+        || r1 > R1_MAX
+        || r2 > R2_MAX
+        || n_out == 0
+        || n_out > N_OUT_MAX
+    {
         return None;
     }
     let n_weights = rd32(BLOB_BASE + 16);

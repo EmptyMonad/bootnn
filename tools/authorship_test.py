@@ -185,6 +185,58 @@ def one_time_enforced(tmp):
           f"leaf {n+1} of {n} refused loudly")
 
 
+def adversarial_ssid(tmp):
+    """One-time-ness must survive an ADVERSARIAL envelope, not just an
+    honest one. Reusing a leaf pubkey with a different fabricated auth
+    path yields a different (still-certifying) ssid; if the reuse guard
+    keyed on the self-asserted ssid, the two would look distinct and
+    slip. Keying on the pubkey - the material a signature reveals -
+    catches it."""
+    from hbss import _h, keypair, merkle_root_from_leaf, pk_hex, sign
+    led = ledger.Ledger(Path(tmp) / "advssid.jsonl")
+    for i in range(2):
+        led.append("claim", {"account": "eve", "seed": i, "epochs": 1,
+                             "lr": 0.02, "claimed_crc": i})
+    sk, pk = keypair("adversary-leaf")
+    pubkey = pk_hex(pk)
+    leafhash = _h(bytes.fromhex(pubkey))
+    lines = []
+    for n, ln in enumerate(led.path.read_text().splitlines()):
+        e = json.loads(ln)
+        sib = bytes([n + 1]) * 32          # a different path per entry
+        ssid = merkle_root_from_leaf(leafhash, 0, [sib]).hex()
+        e["author"] = {"ssid": ssid, "pubkey": pubkey,
+                       "sig": sign(sk, e["hash"]), "leaf": 0,
+                       "path": [sib.hex()]}
+        # Both envelopes independently certify (each ssid IS the root of
+        # its own path) - the attacker's freedom.
+        assert hbss.certify(e["author"]), "fabricated envelope rejected"
+        lines.append(json.dumps(e, sort_keys=True, separators=(",", ":")))
+    led.path.write_text("\n".join(lines) + "\n")
+    _, errors = ledger.Ledger(led.path).fold()
+    assert any("reused" in x for x in errors), \
+        "adversarial ssid variation evaded one-time-leaf detection"
+    print("[authorship] adversarial ssid: leaf reuse under two fabricated "
+          "ssids still fails audit (dedup keys on pubkey)")
+
+
+def fold_totality(tmp):
+    """fold() classifies malformed envelopes; it never raises. A signed
+    entry with the signature field stripped is an integrity error, not
+    a KeyError that takes down the audit."""
+    _, _, led = _mint_one(tmp, "totality", "signer-seed-1")
+    lines = led.path.read_text().splitlines()
+    e = json.loads(lines[0])
+    del e["author"]["sig"]
+    lines[0] = json.dumps(e, sort_keys=True, separators=(",", ":"))
+    bad = Path(tmp) / "no_sig.jsonl"
+    bad.write_text("\n".join(lines) + "\n")
+    _, errors = ledger.Ledger(bad).fold()          # must not raise
+    assert any("missing pubkey/sig" in x for x in errors), errors
+    print("[authorship] fold totality: envelope missing sig -> audit "
+          "error, not a crash")
+
+
 def integrity(tmp):
     _, _, led = _mint_one(tmp, "signed_integ", "signer-seed-1")
     lines = led.path.read_text().splitlines()
@@ -208,6 +260,8 @@ def main():
     neutrality(tmp)
     persistence(tmp)
     one_time_enforced(tmp)
+    adversarial_ssid(tmp)
+    fold_totality(tmp)
     integrity(tmp)
     print("[authorship] result: PASS - identity is optional, persistent, "
           "unforgeable when present, and never buys a mint")

@@ -163,7 +163,15 @@ def metal_trajectory(profile_id, artifact_path, probe, port=55670,
     _check_topology(profile_id, artifact_path)
     if profile_id == "qemu-tcg-riscv32-virt":
         return _riscv_trajectory(artifact_path, probe, port, qemu)
-    return _x86_trajectory(profile_id, artifact_path, probe, port, qemu)
+    if profile_id == "qemu-tcg-x86":
+        return _x86_trajectory(profile_id, artifact_path, probe, port, qemu)
+    # A profile in PROFILES (so validate_portability accepts it) but
+    # with no boot recipe must fail LOUDLY - never silently fall
+    # through to the x86 substrate, which would boot the wrong machine
+    # and burn the claim's single verdict slot on a REJECTED it never
+    # earned.
+    sys.exit(f"ERROR: profile {profile_id!r} is listed but has no boot "
+             f"recipe - refusing to guess a substrate")
 
 
 def _sibling_qemu(name):

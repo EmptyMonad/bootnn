@@ -203,6 +203,21 @@ def uniqueness(tmp, led_path, measured):
           "boot; forged double-verdict still mints the pair once")
 
 
+def fold_totality(tmp):
+    """fold() stays total against a forged portability claim: a
+    hash-chained but malformed claim (op=portability, no artifact_crc)
+    with a forged verified verdict is an audit error, never a KeyError
+    that crashes the whole ledger."""
+    led = ledger.Ledger(tmp / "forged_portability.jsonl")
+    led.append("claim", {"account": "trudy", "op": "portability"})
+    led.append("verdict", {"claim_idx": 0, "verified": True,
+                           "replay_ok": True, "law_ok": True})
+    _, errors = led.fold()                          # must not raise
+    assert any("missing artifact_crc/profile" in x for x in errors), errors
+    print("[portability_test] fold totality: forged malformed portability "
+          "claim -> audit error, not a crash")
+
+
 def faithfulness_wiring():
     """No boot: both sides canned, the decision logic must reject a
     profile whose metal disagrees with the law."""
@@ -232,6 +247,7 @@ def main():
     tmp = Path(tempfile.mkdtemp())
     grammar()
     topology_guard(tmp)
+    fold_totality(tmp)
     faithfulness_wiring()
     led_path, measured = honest_and_dishonest(tmp)
     uniqueness(tmp, led_path, measured)

@@ -100,6 +100,9 @@ def compile_intent(answers, out_path, manifest_path=None):
             sys.exit("ERROR: specialist provisioning requires a base "
                      "manifest to extend (--manifest)")
         base = json.loads(Path(manifest_path).read_text())
+        if not isinstance(base.get("scopes"), list):
+            sys.exit("ERROR: base manifest is not the current schema "
+                     "(no 'scopes'); regenerate it with tools/s3_forest.py")
         provision = dict(PROVISION_POLICY,
                          op="create_leaf",
                          leaf=len(base["scopes"]),

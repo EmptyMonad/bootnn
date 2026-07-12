@@ -117,17 +117,28 @@ class Ledger:
             author = e.get("author")
             if author is not None:
                 from hbss import certify, verify
-                if not verify(author["pubkey"], e["hash"], author["sig"]):
+                pubkey, sig = author.get("pubkey"), author.get("sig")
+                if not isinstance(pubkey, str) or not isinstance(sig, str):
+                    # fold is TOTAL over adversarial logs: a malformed
+                    # envelope is an integrity error, never an exception.
+                    errors.append(f"entry {e['idx']}: author envelope "
+                                  f"missing pubkey/sig")
+                elif not verify(pubkey, e["hash"], sig):
                     errors.append(f"entry {e['idx']}: author signature invalid")
                 elif not certify(author):
                     errors.append(f"entry {e['idx']}: ssid does not certify")
                 else:
-                    lk = (author["ssid"], author.get("leaf", 0))
-                    if lk in leaves_spent:
+                    # One-time-ness keys on the LEAF PUBKEY - the secret
+                    # material a signature reveals - NOT the self-asserted
+                    # ssid. An adversary can vary the ssid by fabricating
+                    # an auth path that still certifies, but reusing a
+                    # leaf means reusing its pubkey; two signatures under
+                    # one pubkey reveal preimages twice, so reuse fails
+                    # audit regardless of the ssid claimed.
+                    if pubkey in leaves_spent:
                         errors.append(f"entry {e['idx']}: one-time leaf "
-                                      f"{lk[1]} of ssid {lk[0][:12]}... "
-                                      f"reused")
-                    leaves_spent.add(lk)
+                                      f"reused (pubkey {pubkey[:12]}...)")
+                    leaves_spent.add(pubkey)
             d = e["data"]
             if e["type"] == "claim":
                 claims[e["idx"]] = d
@@ -141,16 +152,26 @@ class Ledger:
                     verdicted.add(ci)
                     if d["verified"]:
                         c = claims[ci]
-                        acct = c["account"]
-                        if c.get("op") == "portability":
-                            # Coverage mints once per (artifact,
-                            # profile) - even a forged duplicate
-                            # verdict buys nothing at the fold.
-                            pair = (c["artifact_crc"], c["profile"])
-                            if pair not in covered:
-                                covered.add(pair)
-                                balances[acct] = balances.get(acct, 0) \
-                                    + MINT_PER_PORTABILITY
+                        acct = c.get("account")
+                        if acct is None:
+                            errors.append(f"entry {e['idx']}: verified "
+                                          f"claim {ci} has no account")
+                        elif c.get("op") == "portability":
+                            # Coverage mints once per (artifact, profile)
+                            # - even a forged duplicate verdict buys
+                            # nothing at the fold. Missing pair fields on
+                            # a forged claim are an audit error, not a
+                            # crash (fold stays total).
+                            if "artifact_crc" not in c or "profile" not in c:
+                                errors.append(f"entry {e['idx']}: "
+                                              f"portability claim {ci} "
+                                              f"missing artifact_crc/profile")
+                            else:
+                                pair = (c["artifact_crc"], c["profile"])
+                                if pair not in covered:
+                                    covered.add(pair)
+                                    balances[acct] = balances.get(acct, 0) \
+                                        + MINT_PER_PORTABILITY
                         else:
                             balances[acct] = balances.get(acct, 0) \
                                 + MINT_PER_VERIFIED_CLAIM
