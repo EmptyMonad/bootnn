@@ -444,8 +444,17 @@ conversation. Order is deliberate.
    norms pinned. At width, STE decouples: shadow descent moves
    magnitudes, not sign crossings — law-motion starvation, measured.
    Named next design: churn homeostasis — the stability thermostat
-   generalized from norms to law motion, regulating the projection
-   threshold to hold sign-churn in the measured healthy band.
+   generalized from norms to law motion. Seventh campaign
+   (2026-07-13): run with predictions written first, and FALSIFIED —
+   the servo drove steps up 16× and churn kept sinking, because
+   `gmed=0`: most readout weights receive exactly zero gradient
+   (integer cancellation), and a step multiplies the momentum of a
+   zero. Law-motion starvation is gradient-DENSITY-limited, not
+   step-limited. Next, measure-first: per-layer nonzero-gradient
+   density at both widths — if h=512's is lower, the width killer is
+   the per-sample >>8 gradient floor, and the fix is
+   precision-targeted (shift sizing or residue carry to hold
+   density). The falsified servo stays as committed apparatus.
 
 ## Completed backlog (Tier 2/3 era)
 

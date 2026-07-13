@@ -138,13 +138,28 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   4x the weights, and the rare monster-gradient flips drift the
   realized loss upward. Shadow descent decouples from law
   improvement: LAW-MOTION STARVATION, measured.
-  NEXT DESIGN (derived from the churn data, not yet run): churn
-  homeostasis - the fourth campaign's thermostat generalized from
-  norms to LAW MOTION. Regulate the projection threshold (delta
-  scale) per layer to hold sign-churn in the measured healthy band
-  (~20-50 per mille); alternatively scale shadow magnitudes toward
-  the projection unit so ordinary gradients can cross thresholds.
-  29.9% at h=128 stands as the reproducible state of the art.
+  SEVENTH CAMPAIGN (2026-07-13) - CHURN HOMEOSTASIS RUN AND
+  FALSIFIED; the mechanism sharpens. Predictions were written first:
+  P1 (h=512: servo lifts churn into band, loss direction flips, best
+  > 15%) FAILED on all three - churn kept sinking (L2 to 6-8 per
+  mille) while the servo drove steps up 16x, loss still ascends,
+  best 14.3%. P2 (h=128 non-regression) partially failed: 27.2% vs
+  29.9% (healthy churn grazes the band's lower edge late in runs, so
+  the servo perturbs steps it should leave alone).
+  WHY THE ACTUATOR FAILED IS THE FINDING: gmed=0 on the readout
+  layers means most weights receive EXACTLY ZERO gradient (integer
+  cancellation) - the servo multiplies the momentum of a zero.
+  Law-motion starvation is GRADIENT-DENSITY-limited, not
+  step-limited; step size was the wrong actuator variable. The
+  suspect with a measured trail: the per-sample >>8 range shifts
+  floor small backward values to exact zero, and h=512's
+  cancellation profile floors more of them.
+  NEXT (measure first): log the per-layer NONZERO-GRADIENT DENSITY
+  at both widths. If h=512's is materially lower, the width killer
+  is the gradient floor, and the fix is precision-targeted: size the
+  per-sample shifts (or carry residue) to hold nonzero-density, not
+  magnitude. --churn-servo stays as committed apparatus, off by
+  default. 29.9% at h=128 stands as the state of the art.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -175,6 +190,9 @@ A_S2 = 8                    # adam: 2nd-moment EMA shift (beta2 ~ 0.996)
 A_GQ = 4                    # pre-shift before squaring (int64 headroom)
 
 FREEZE = 200                # epochs before per-layer shifts freeze
+CH_LO, CH_HI = 20, 60       # healthy sign-churn band, per mille (measured)
+CH_T = 25                   # churn servo cadence, epochs
+ADJ_MIN, ADJ_MAX = -4, 6    # per-layer step adjustment bounds (shifts)
 MASK64 = (1 << 64) - 1
 
 
@@ -292,6 +310,9 @@ class IntLab:
         self.lr0 = 0
         self.freeze_at = FREEZE
         self.trace = 0
+        self.churn_servo = False
+        self.step_adj = [0, 0, 0, 0]
+        self._servo_prev = None
         self.wd_f = 0
 
     def project(self):
@@ -438,10 +459,13 @@ class IntLab:
             # its scale). After: the OU regime - fixed step (set at
             # freeze) + restoring decay below.
             if self.step_f is not None:
-                # The decay schedule applies to the frozen step too:
-                # lr_shift arrives schedule-incremented, so the excess
-                # over the base shift scales the step down.
-                step_q = max(self.step_f[i] >> (lr_shift - self.lr0), 1)
+                # The decay schedule applies to the frozen step too
+                # (lr_shift arrives schedule-incremented), and the
+                # churn servo's per-layer adjustment composes with it.
+                # A negative total shift means the servo grew the step.
+                sh = (lr_shift - self.lr0) + self.step_adj[i]
+                step_q = max(self.step_f[i] >> sh if sh >= 0
+                             else self.step_f[i] << -sh, 1)
             else:
                 step_q = max((int(np.abs(w).sum()) // w.size)
                              >> lr_shift, 1)
@@ -552,6 +576,26 @@ class IntLab:
                       f"{self.step_f}, decay shift {self.wd_f}, "
                       f"set-point norms {[n >> 14 for n in norms]}")
             g, _, n_wrong, loss = self.grads(X, cls, signs, ks)
+            # CHURN HOMEOSTASIS (sixth campaign's derived design): the
+            # norm thermostat generalized from scale to LAW MOTION.
+            # Every CH_T epochs post-freeze, measure each layer's
+            # sign-churn; below the healthy band the layer's step
+            # doubles (shadow descent is starving the law of motion -
+            # the measured h=512 failure), above it the step halves.
+            # Same set-point-servo grammar, one level up.
+            if self.churn_servo and self.frozen is not None \
+                    and ep % CH_T == 0:
+                if self._servo_prev is not None:
+                    for i, (s, p) in enumerate(zip(signs,
+                                                   self._servo_prev)):
+                        churn = int((s != p).sum()) * 1000 // s.size
+                        if churn < CH_LO:
+                            self.step_adj[i] = max(self.step_adj[i] - 1,
+                                                   ADJ_MIN)
+                        elif churn > CH_HI:
+                            self.step_adj[i] = min(self.step_adj[i] + 1,
+                                                   ADJ_MAX)
+                self._servo_prev = [s.copy() for s in signs]
             if self.trace and ep % self.trace == 0:
                 acc_t, (h_t, _z1, _m1, _z2, _m2, _masks) =                     self.forward_train(X[:32], signs, ks)
                 hc = 32767 << ks[0]
@@ -657,6 +701,10 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
     ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
+    ap.add_argument("--churn-servo", action="store_true",
+                    help="hold per-layer sign-churn in the healthy band "
+                         "by adjusting each layer's step (law-motion "
+                         "homeostasis)")
     ap.add_argument("--trace", type=int, default=0,
                     help="log per-layer warmup diagnostics every N epochs")
     ap.add_argument("--freeze", type=int, default=FREEZE,
@@ -675,6 +723,7 @@ def main():
     lab.wd = args.wd_shift
     lab.freeze_at = args.freeze
     lab.trace = args.trace
+    lab.churn_servo = args.churn_servo
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
