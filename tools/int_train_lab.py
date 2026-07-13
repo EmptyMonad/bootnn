@@ -181,8 +181,16 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   Predictions hit again: m2 liveness fully recovered AND RISING
   (150 -> 187 per mille through the window, above h=128's own ~173;
   units coming alive over time instead of dying) and a new width
-  record, 18.4% in the 1001-epoch window. Full-length h=512 run
-  queued. The >>8 residue hypothesis stays third in line.
+  record, 18.4% in the 1001-epoch window.
+  FULL-LENGTH VERDICT (3000 epochs, both floors): WIDTH PAYS.
+  Loss monotone 141M -> 58M across the whole run - no divergence, no
+  collapse, the homeostat and floors holding end to end - and best
+  climbed 17.7 -> 18.4 -> 21.1 -> 27.9 -> 33.3%, STILL RISING at
+  epoch 3000. h=512 beats the h=128 state of the art (29.9%) for the
+  first time in nine campaigns: NEW STATE OF THE ART 33.3%. The
+  trajectory has not plateaued - a longer horizon is the obvious
+  next spend (flag-first; ~40 min per 3000 epochs at this width).
+  The >>8 residue hypothesis stays in line behind that.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
