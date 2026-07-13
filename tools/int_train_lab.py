@@ -342,6 +342,7 @@ class IntLab:
         self.freeze_at = FREEZE
         self.kin_floor = 3
         self.k1_floor = 0
+        self.save_path = None
         self.trace = 0
         self.churn_servo = False
         self.step_adj = [0, 0, 0, 0]
@@ -676,6 +677,13 @@ class IntLab:
                             == val_cls).mean())
                 if va > best:
                     best, best_w = va, [w.copy() for w in self.w]
+                    # Checkpoint on new best: a multi-hour run must
+                    # survive interruption (learned the hard way at
+                    # ep4600 of a 10k run - the PC closed and the
+                    # in-memory best died with it; determinism made
+                    # the loss replayable but not free).
+                    if self.save_path:
+                        self.save(self.save_path)
                 norms = [int(np.abs(w).sum()) // w.size for w in self.w]
                 print(f"  epoch {ep:5d}: loss={loss:>12}  "
                       f"violations={n_wrong:4d}  law={va * 100:5.1f}%  "
@@ -789,6 +797,7 @@ def main():
     lab.churn_servo = args.churn_servo
     lab.kin_floor = args.kin_floor
     lab.k1_floor = args.k1_floor
+    lab.save_path = args.save
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
