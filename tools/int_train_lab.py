@@ -174,11 +174,15 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   recovered at 56-84), loss direction FLIPPED (249M -> 134M
   descending; was 216M -> 891M ascending), and the 15% width ceiling
   broke: best 17.0%, monotone through the window.
-  OPEN: h=512 at 17.0% vs h=128's 25.2% at matched epochs, with m2
-  liveness only half-recovered - the same floor logic applied to k1
-  is the measured next refinement. 29.9% at h=128 stands; the
-  gradient-floor (>>8 residue) hypothesis remains unexplored but is
-  now second in line behind clamp geometry.
+  NINTH CAMPAIGN (2026-07-13, walk batch): the k1 floor
+  (--k1-floor, default 0 - narrow runs untouched, 29.9% reproduced
+  bit-exactly as non-regression) compensates fan-in clamp geometry
+  one layer up: +1 shift for the 4x-terms/2x-sqrt-scale a2 sums.
+  Predictions hit again: m2 liveness fully recovered AND RISING
+  (150 -> 187 per mille through the window, above h=128's own ~173;
+  units coming alive over time instead of dying) and a new width
+  record, 18.4% in the 1001-epoch window. Full-length h=512 run
+  queued. The >>8 residue hypothesis stays third in line.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -329,6 +333,7 @@ class IntLab:
         self.lr0 = 0
         self.freeze_at = FREEZE
         self.kin_floor = 3
+        self.k1_floor = 0
         self.trace = 0
         self.churn_servo = False
         self.step_adj = [0, 0, 0, 0]
@@ -590,6 +595,12 @@ class IntLab:
                 # the drive bound |x@s| <= 2048 stays meaningful).
                 ks = list(ks)
                 ks[0] = max(ks[0], self.kin_floor)
+                # k1 floor (ninth campaign): with k_in floored, the
+                # remaining m2 liveness gap tracks fan-in - a2 sums
+                # 4x the terms at h=512, sqrt-scale 2x bigger, against
+                # the same clamp. +1 shift compensates. Default 0:
+                # narrow runs are untouched.
+                ks[1] = max(ks[1], self.k1_floor)
                 self.frozen = ks
                 # OU homeostasis: from here the step is FIXED at the
                 # freeze-time scale and shift-decay opposes diffusion.
@@ -742,6 +753,9 @@ def main():
     ap.add_argument("--kin-floor", type=int, default=3,
                     help="minimum frozen k_in (clamp-geometry floor; "
                          "0 disables)")
+    ap.add_argument("--k1-floor", type=int, default=0,
+                    help="minimum frozen k1 (fan-in clamp compensation "
+                         "for wide runs; 0 = untouched)")
     ap.add_argument("--churn-servo", action="store_true",
                     help="hold per-layer sign-churn in the healthy band "
                          "by adjusting each layer's step (law-motion "
@@ -766,6 +780,7 @@ def main():
     lab.trace = args.trace
     lab.churn_servo = args.churn_servo
     lab.kin_floor = args.kin_floor
+    lab.k1_floor = args.k1_floor
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
