@@ -154,12 +154,31 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   suspect with a measured trail: the per-sample >>8 range shifts
   floor small backward values to exact zero, and h=512's
   cancellation profile floors more of them.
-  NEXT (measure first): log the per-layer NONZERO-GRADIENT DENSITY
-  at both widths. If h=512's is materially lower, the width killer
-  is the gradient floor, and the fix is precision-targeted: size the
-  per-sample shifts (or carry residue) to hold nonzero-density, not
-  magnitude. --churn-servo stays as committed apparatus, off by
-  default. 29.9% at h=128 stands as the state of the art.
+  EIGHTH CAMPAIGN (2026-07-13) - THE CAUSAL CHAIN, MEASURED END TO
+  END, AND THE FIRST INTERVENTION THAT WORKS. Density measured
+  (gnnz in --trace): h=512 mid-readouts carry ~half of h=128's
+  nonzero-gradient density and it DECLINES (L1 102->63 vs steady
+  ~174), rank-correlating exactly with the churn measurements.
+  Liveness measured (relu-mask trace): the source is STRUCTURAL -
+  h=512 ReLU liveness collapses to 2% (24/21 per mille, falling) vs
+  h=128's stable 12-17%; the >>8 floor is exonerated as primary.
+  The chain: width -> faster L0 warmup (norms 4.2x) -> k_in freezes
+  1 vs 3 -> every downstream shadow clamp (32767 << (k_in+...))
+  narrows 4x while fan-in sums grow 2x -> liveness collapses 5x ->
+  masks zero the gradients -> the law starves. (Theory 3 checked h
+  saturation and was rightly falsified; the same clamp mechanism
+  operates one level up, at a1/a2, where it wasn't measured.)
+  INTERVENTION (--kin-floor, default 3): floor the frozen k_in at
+  the healthy operating point - one lawful line. Predictions written
+  first, three for three: liveness recovered (m1 166 vs 24; m2 half-
+  recovered at 56-84), loss direction FLIPPED (249M -> 134M
+  descending; was 216M -> 891M ascending), and the 15% width ceiling
+  broke: best 17.0%, monotone through the window.
+  OPEN: h=512 at 17.0% vs h=128's 25.2% at matched epochs, with m2
+  liveness only half-recovered - the same floor logic applied to k1
+  is the measured next refinement. 29.9% at h=128 stands; the
+  gradient-floor (>>8 residue) hypothesis remains unexplored but is
+  now second in line behind clamp geometry.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -309,6 +328,7 @@ class IntLab:
         self.norm_f = None
         self.lr0 = 0
         self.freeze_at = FREEZE
+        self.kin_floor = 3
         self.trace = 0
         self.churn_servo = False
         self.step_adj = [0, 0, 0, 0]
@@ -535,6 +555,7 @@ class IntLab:
             print(f"  [trace] ep {ep:4d} L{i}: mean={mean:>10} "
                   f"alpha={alpha:>10} k={k:2d} "
                   f"dens={int(nz.size) * 1000 // aw.size:4d} "
+                  f"gnnz={int((ag > 0).sum()) * 1000 // ag.size:4d} "
                   f"gmed={int(np.median(ag)):>12} gmax={int(ag.max()):>15}",
                   flush=True)
 
@@ -558,6 +579,17 @@ class IntLab:
                 X, cls = encode(gen_data(stream, ctx_per_key))
             signs, ks = self.project()
             if self.frozen is None and ep == self.freeze_at:
+                # k_in floor (eighth campaign): the drive-layer k sets
+                # every downstream shadow clamp (32767 << (k_in+...)).
+                # Measured causal chain at width: faster L0 warmup ->
+                # k_in freezes low -> clamps narrow 4x while fan-in
+                # sums grow 2x -> ReLU liveness collapses to 2% ->
+                # gradient masks starve the law. Flooring k_in at the
+                # healthy operating point keeps the clamp geometry
+                # width-invariant; lawful (any k is format-valid, and
+                # the drive bound |x@s| <= 2048 stays meaningful).
+                ks = list(ks)
+                ks[0] = max(ks[0], self.kin_floor)
                 self.frozen = ks
                 # OU homeostasis: from here the step is FIXED at the
                 # freeze-time scale and shift-decay opposes diffusion.
@@ -597,12 +629,18 @@ class IntLab:
                                                    ADJ_MAX)
                 self._servo_prev = [s.copy() for s in signs]
             if self.trace and ep % self.trace == 0:
-                acc_t, (h_t, _z1, _m1, _z2, _m2, _masks) =                     self.forward_train(X[:32], signs, ks)
+                acc_t, (h_t, _z1, _m1t, _z2, _m2t, _masks) =                     self.forward_train(X[:32], signs, ks)
+                _masks_live = (_m1t, _m2t)
                 hc = 32767 << ks[0]
                 sat = [int((np.abs(h_t[:, blk * (self.H // 8):
                                         (blk + 1) * (self.H // 8)])
                             >= hc).sum()) * 1000
                        // (32 * (self.H // 8)) for blk in range(8)]
+                _m1, _m2 = _masks_live
+                print(f"  [trace] ep {ep:4d} relu-mask OPEN per mille: "
+                      f"m1={int(_m1.sum()) * 1000 // _m1.size} "
+                      f"m2={int(_m2.sum()) * 1000 // _m2.size}",
+                      flush=True)
                 self.trace_line(ep, g, sat)
             # sign-SGD converges to a noise ball proportional to the
             # step; a stepped shift schedule (integer, deterministic)
@@ -701,6 +739,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
     ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
+    ap.add_argument("--kin-floor", type=int, default=3,
+                    help="minimum frozen k_in (clamp-geometry floor; "
+                         "0 disables)")
     ap.add_argument("--churn-servo", action="store_true",
                     help="hold per-layer sign-churn in the healthy band "
                          "by adjusting each layer's step (law-motion "
@@ -724,6 +765,7 @@ def main():
     lab.freeze_at = args.freeze
     lab.trace = args.trace
     lab.churn_servo = args.churn_servo
+    lab.kin_floor = args.kin_floor
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)

@@ -450,11 +450,18 @@ conversation. Order is deliberate.
    `gmed=0`: most readout weights receive exactly zero gradient
    (integer cancellation), and a step multiplies the momentum of a
    zero. Law-motion starvation is gradient-DENSITY-limited, not
-   step-limited. Next, measure-first: per-layer nonzero-gradient
-   density at both widths — if h=512's is lower, the width killer is
-   the per-sample >>8 gradient floor, and the fix is
-   precision-targeted (shift sizing or residue carry to hold
-   density). The falsified servo stays as committed apparatus.
+   step-limited. Eighth campaign (2026-07-13): the width mechanism
+   measured END TO END and the first intervention that works. The
+   density deficit was confirmed (~half, declining, rank-correlated
+   with churn), then traced structurally: h=512's ReLU liveness
+   collapses to 2% because k_in freezes at 1 vs 3, narrowing every
+   downstream shadow clamp 4× while fan-in sums grow 2×. One lawful
+   line — floor the frozen k_in at the healthy operating point
+   (--kin-floor 3) — went three-for-three on written predictions:
+   liveness recovered 7×, the loss direction flipped from ascent to
+   descent, and the 15% width ceiling broke (best 17.0%, monotone).
+   Open: 17.0% vs 25.2% at matched epochs with m2 half-recovered —
+   the same floor applied to k1 is the measured next refinement.
 
 ## Completed backlog (Tier 2/3 era)
 
