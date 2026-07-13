@@ -436,6 +436,16 @@ conversation. Order is deliberate.
    says INSTRUMENT FIRST before more theory. 29.9% at h=128 stands,
    reproduced bit-exactly. Two overflow traps ledgered in the lab
    docstring.
+   Sixth campaign (2026-07-13): instrumentation landed (--trace) and
+   found the fork — a third theory (clamp saturation) died to a
+   4-minute measurement, and the real discriminator is LOSS
+   DIRECTION: h=128 descends while h=512's realized-law loss RISES
+   4× with signs nearly frozen (churn BELOW the healthy band) and
+   norms pinned. At width, STE decouples: shadow descent moves
+   magnitudes, not sign crossings — law-motion starvation, measured.
+   Named next design: churn homeostasis — the stability thermostat
+   generalized from norms to law motion, regulating the projection
+   threshold to hold sign-churn in the measured healthy band.
 
 ## Completed backlog (Tier 2/3 era)
 

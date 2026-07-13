@@ -120,14 +120,31 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   h=128 both ways (16.3% uncapped, 9.5% capped): the warmup
   inflation is not a bug to remove - the system NEEDS to find its
   equilibrium scale before k and the set-points lock.
-  OPEN after five campaigns: WHY width breaks learning while
-  stability holds. The warmup dynamics that select the frozen regime
-  are demonstrably decisive and demonstrably not understood -
-  INSTRUMENT FIRST (log alpha, k, violation and per-layer |g|
-  trajectories through warmup at h=128 vs h=512 and diff them)
-  before any further theory. 29.9% at h=128 stands as the
-  reproducible state of the art; the run that produces it is a pure
-  function of the seed.
+  SIXTH CAMPAIGN (2026-07-13) - INSTRUMENTED; the fork is found.
+  --trace lands (per-layer mean/alpha/k/density/gmed/gmax, per-decay
+  h-saturation, and projection SIGN-CHURN per mille). Theory 3
+  (clamp saturation kills long decay horizons at k_in=1) was
+  falsified in one 4-minute measurement: saturation is 0 at every
+  decay block, both widths. The warmup trajectories are
+  near-identical across widths; the failure is post-freeze, and the
+  discriminator is LOSS DIRECTION: through epochs 300-1000, h=128's
+  loss falls 21M->6.3M with churn settling at 20-50 per mille, while
+  h=512's loss RISES 216M->891M with violations flat, norms pinned,
+  and churn LOWER than the healthy run (4-20 per mille - the law is
+  nearly frozen). Reading: at width, STE's identity assumption
+  breaks - surviving shadow weights sit ~30x the projection unit, so
+  descent moves magnitudes (law-invariant) instead of crossing sign
+  thresholds; absolute flip counts are BELOW the healthy run despite
+  4x the weights, and the rare monster-gradient flips drift the
+  realized loss upward. Shadow descent decouples from law
+  improvement: LAW-MOTION STARVATION, measured.
+  NEXT DESIGN (derived from the churn data, not yet run): churn
+  homeostasis - the fourth campaign's thermostat generalized from
+  norms to LAW MOTION. Regulate the projection threshold (delta
+  scale) per layer to hold sign-churn in the measured healthy band
+  (~20-50 per mille); alternatively scale shadow magnitudes toward
+  the projection unit so ordinary gradients can cross thresholds.
+  29.9% at h=128 stands as the reproducible state of the art.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
@@ -274,6 +291,7 @@ class IntLab:
         self.norm_f = None
         self.lr0 = 0
         self.freeze_at = FREEZE
+        self.trace = 0
         self.wd_f = 0
 
     def project(self):
@@ -463,6 +481,39 @@ class IntLab:
                int(np.abs(w).sum()) // w.size > self.norm_f[i]:
                 w -= np.sign(w) * (np.abs(w) >> wd)
 
+    def trace_line(self, ep, grads, sat=None):
+        """Warmup instrumentation (fifth campaign's instruction: the
+        dynamics that select the frozen regime are decisive - measure
+        them instead of theorizing). One line per layer, all integers,
+        machine-diffable across widths. `sat` = per-decay-block h
+        clamp-saturation per mille (which memory horizons are alive)."""
+        if sat is not None:
+            print(f"  [trace] ep {ep:4d} h-saturation per mille by "
+                  f"decay d=1..8: {sat}", flush=True)
+        # Projection sign-churn: how much of the TERNARY LAW flipped
+        # since the last trace - the law the val metric runs on can
+        # thrash while the shadow drifts smoothly.
+        signs_now = [int_project(w)[0] for w in self.w]
+        if getattr(self, "_prev_signs", None) is not None:
+            churn = [int((s != p).sum()) * 1000 // s.size
+                     for s, p in zip(signs_now, self._prev_signs)]
+            print(f"  [trace] ep {ep:4d} sign-churn per mille since "
+                  f"last trace: {churn}", flush=True)
+        self._prev_signs = signs_now
+        for i, (w, g) in enumerate(zip(self.w, grads)):
+            aw = np.abs(w)
+            mean = int(aw.sum()) // aw.size
+            delta = (3 * mean) >> 2
+            nz = aw[aw > delta]
+            alpha = int(nz.sum()) // max(int(nz.size), 1)
+            k = min(max(F - _round_log2(max(alpha, 1)), 0), 15)
+            ag = np.abs(g)
+            print(f"  [trace] ep {ep:4d} L{i}: mean={mean:>10} "
+                  f"alpha={alpha:>10} k={k:2d} "
+                  f"dens={int(nz.size) * 1000 // aw.size:4d} "
+                  f"gmed={int(np.median(ag)):>12} gmax={int(ag.max()):>15}",
+                  flush=True)
+
     def accuracy(self, X, cls, signs, ks):
         acc, _ = self.forward(X, signs, ks)
         return float((acc[:, :N_CMD].argmax(axis=1) == cls).mean())
@@ -501,6 +552,14 @@ class IntLab:
                       f"{self.step_f}, decay shift {self.wd_f}, "
                       f"set-point norms {[n >> 14 for n in norms]}")
             g, _, n_wrong, loss = self.grads(X, cls, signs, ks)
+            if self.trace and ep % self.trace == 0:
+                acc_t, (h_t, _z1, _m1, _z2, _m2, _masks) =                     self.forward_train(X[:32], signs, ks)
+                hc = 32767 << ks[0]
+                sat = [int((np.abs(h_t[:, blk * (self.H // 8):
+                                        (blk + 1) * (self.H // 8)])
+                            >= hc).sum()) * 1000
+                       // (32 * (self.H // 8)) for blk in range(8)]
+                self.trace_line(ep, g, sat)
             # sign-SGD converges to a noise ball proportional to the
             # step; a stepped shift schedule (integer, deterministic)
             # shrinks the ball. decay_every=0 disables.
@@ -598,6 +657,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--decay-every", type=int, default=0)
     ap.add_argument("--opt", choices=["sign", "adam"], default="adam")
+    ap.add_argument("--trace", type=int, default=0,
+                    help="log per-layer warmup diagnostics every N epochs")
     ap.add_argument("--freeze", type=int, default=FREEZE,
                     help="epoch at which shifts, OU step and set-points "
                          "freeze; 0 = stationary from init (no "
@@ -613,6 +674,7 @@ def main():
     lab.opt = args.opt
     lab.wd = args.wd_shift
     lab.freeze_at = args.freeze
+    lab.trace = args.trace
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)
