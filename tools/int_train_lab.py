@@ -207,6 +207,20 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   k3 from the val logit distribution) or a loss term anchoring
   logits in-window; then the 64.6 -> 95 gap (full task incl. words,
   longer horizons) - engineering now, not mystery.
+  ELEVENTH CAMPAIGN (2026-07-14) - ALIGNMENT. Deterministic output
+  calibration lands: calib_delta = max(0, bl(max|acc|) - 13), applied
+  identically in accuracy() (evaluate as-saved) and save() (written
+  into the header k3) - the rule reproduces the empirical sweep's
+  plateau (gives 9; plateau was 7-10 at equal accuracy). The
+  artifact==metric alignment check then caught a SECOND illusion:
+  the checkpoint copied post-step weights, one update past the law
+  that earned the score (29.9% reported, 24.5% on disk; a flat
+  k3-sweep exonerated calibration and convicted the loop order).
+  Eval and checkpoint now precede the step. Verified exact: reported
+  best == on-disk artifact == law rule, 29.9% at h=128. Corollary:
+  every artifact saved before this fix was one step stale - the
+  64.6% canonical score of the 10k h=512 run is a LOWER BOUND;
+  an aligned rerun is queued (flag-first, ~4h).
   Prior full-length note (3000 epochs, both floors): WIDTH PAYS.
   Loss monotone 141M -> 58M across the whole run - no divergence, no
   collapse, the homeostat and floors holding end to end - and best
@@ -368,6 +382,7 @@ class IntLab:
         self.kin_floor = 3
         self.k1_floor = 0
         self.save_path = None
+        self.calib = None
         self.trace = 0
         self.churn_servo = False
         self.step_adj = [0, 0, 0, 0]
@@ -598,27 +613,47 @@ class IntLab:
                   f"gmed={int(np.median(ag)):>12} gmax={int(ag.max()):>15}",
                   flush=True)
 
+    @staticmethod
+    def calib_delta(acc):
+        """Deterministic output-scale calibration: the smallest k3
+        bump that brings max|acc| inside the sigmoid window 2^13.
+        Derived from the tenth campaign's underflow (logits at
+        ~-531k -> delta 7, matching the empirical sweep exactly)."""
+        m = int(np.abs(acc[:, :N_CMD]).max())
+        return max(0, m.bit_length() - 13)
+
     def accuracy(self, X, cls, signs, ks):
         # THE LAW'S decision rule, not the shadow's: the kernel
-        # argmaxes the piecewise-sigmoid OUTPUTS, whose window is
-        # (-8192, 8192] in acc units. Argmaxing raw logits reported
-        # 81% on an artifact whose lawful score was 4.8% - hinge loss
-        # constrains differences only, and the whole logit
-        # distribution had drifted to ~-531k, under the window, so
-        # the law output all-zeros (tenth campaign).
+        # argmaxes the piecewise-sigmoid OUTPUTS, window (-8192, 8192]
+        # in acc units (argmaxing raw logits reported 81% on an
+        # artifact whose lawful score was 4.8% - tenth campaign).
+        # Evaluated AS SAVED: the same calibration save() writes into
+        # the header is applied here, so the training metric and the
+        # artifact's lawful score cannot diverge again.
         acc, _ = self.forward(X, signs, ks)
+        acc = acc >> self.calib_delta(acc)
         out = np.where(acc < -8192, 0,
                        np.where(acc > 8192, 32767, (acc + 8192) * 2))
         return float((out[:, :N_CMD].argmax(axis=1) == cls).mean())
 
     def save(self, path):
         signs, ks = self.project()
-        return save_v5(path, self.d, signs, tuple(int(k) for k in ks))
+        ks = [int(k) for k in ks]
+        # Output-scale calibration into the header: k3 is a shift and
+        # shifts are monotone, so ranking is untouched while the
+        # logits land in the sigmoid window. Calibrated on self.calib
+        # (the val set, fixed at train start); an untrained lab has
+        # no calib -> delta 0, keeping the forward==law gate exact.
+        if self.calib is not None:
+            acc, _ = self.forward(self.calib, signs, ks)
+            ks[3] = min(ks[3] + self.calib_delta(acc), 15)
+        return save_v5(path, self.d, signs, tuple(ks))
 
     def train(self, epochs, lr_shift, ctx_per_key=8, seed_data=777,
               resample_every=25, log_every=50, decay_every=0):
         self.lr0 = lr_shift
         val_X, val_cls = encode(gen_data(XorShift(seed_data + 1), 6))
+        self.calib = val_X
         stream = XorShift(seed_data)
         X, cls = encode(gen_data(stream, ctx_per_key))
         best, best_w = -1.0, None
@@ -662,6 +697,26 @@ class IntLab:
                       f"{self.step_f}, decay shift {self.wd_f}, "
                       f"set-point norms {[n >> 14 for n in norms]}")
             g, _, n_wrong, loss = self.grads(X, cls, signs, ks)
+            # Eval and checkpoint BEFORE stepping: accuracy scores the
+            # projected law of the CURRENT weights, so the checkpoint
+            # must copy those same weights. Copying after step() saved
+            # a law one update past the one that earned the score
+            # (caught by the artifact==metric alignment check: 29.9%
+            # reported, 24.5% on disk).
+            if ep % log_every == 0 or ep == epochs - 1:
+                va = self.accuracy(val_X, val_cls, signs, ks)
+                sacc, _ = self.forward_train(val_X, signs, ks)
+                sa = float((sacc[:, :N_CMD].argmax(axis=1)
+                            == val_cls).mean())
+                if va > best:
+                    best, best_w = va, [w.copy() for w in self.w]
+                    if self.save_path:
+                        self.save(self.save_path)
+                norms = [int(np.abs(w).sum()) // w.size for w in self.w]
+                print(f"  epoch {ep:5d}: loss={loss:>12}  "
+                      f"violations={n_wrong:4d}  law={va * 100:5.1f}%  "
+                      f"shadow={sa * 100:5.1f}%  best={best * 100:5.1f}%  "
+                      f"norm={[n >> 14 for n in norms]}", flush=True)
             # CHURN HOMEOSTASIS (sixth campaign's derived design): the
             # norm thermostat generalized from scale to LAW MOTION.
             # Every CH_T epochs post-freeze, measure each layer's
@@ -704,26 +759,6 @@ class IntLab:
                 self.step_adam(g, min(sh, lr_shift + 4))
             else:
                 self.step(g, min(sh, lr_shift + 4))
-            if ep % log_every == 0 or ep == epochs - 1:
-                va = self.accuracy(val_X, val_cls, signs, ks)
-                sacc, _ = self.forward_train(val_X, signs, ks)
-                sa = float((sacc[:, :N_CMD].argmax(axis=1)
-                            == val_cls).mean())
-                if va > best:
-                    best, best_w = va, [w.copy() for w in self.w]
-                    # Checkpoint on new best: a multi-hour run must
-                    # survive interruption (learned the hard way at
-                    # ep4600 of a 10k run - the PC closed and the
-                    # in-memory best died with it; determinism made
-                    # the loss replayable but not free).
-                    if self.save_path:
-                        self.save(self.save_path)
-                norms = [int(np.abs(w).sum()) // w.size for w in self.w]
-                print(f"  epoch {ep:5d}: loss={loss:>12}  "
-                      f"violations={n_wrong:4d}  law={va * 100:5.1f}%  "
-                      f"shadow={sa * 100:5.1f}%  best={best * 100:5.1f}%  "
-                      f"norm={[n >> 14 for n in norms]}",
-                      flush=True)
         if best_w is not None:
             self.w = best_w
         return best
