@@ -299,6 +299,16 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   - minutes each; (b) longer horizon at width (20k, ~14 h);
   (c) parked in-window loss anchoring. Stop-rule: one width run of
   this shape down.
+  HORIZON PROBE (2026-07-14, same day): the discriminator run,
+  predictions written first. Full-task h=128 at 10k epochs (563 s):
+  val best 33.3 -> 42.4%, static 20/30 -> 26/30 (words 17/20), and
+  the canonical gauntlet 16.5 -> 20.9% - ABOVE the scoped baseline's
+  19.0%. UNCONVERGED confirmed, interference rejected at this width:
+  a longer horizon buys back the scoped cost AND the words, both
+  still rising at ep10k. This licenses the width horizon (20k
+  full-task h=512; determinism makes its first 10k a free bit-exact
+  replay of the fourteenth run, so the spend is +10k new epochs,
+  ~13.7 h wall).
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
