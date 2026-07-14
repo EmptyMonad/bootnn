@@ -469,8 +469,11 @@ conversation. Order is deliberate.
    argmaxed raw logits; the law argmaxes sigmoid outputs);
    deterministic calibration + eval-before-step made
    metric == checkpoint == artifact a verified invariant (29.9%
-   exact at h=128, prior artifacts one step stale — 64.6% is a lower
-   bound, aligned rerun in flight); the full task entered the lab
+   exact at h=128, prior artifacts one step stale); the aligned 10k
+   rerun then replayed the tenth campaign bit-exactly and landed
+   **65.5% (688/1050) canonical** — alignment worth +10 keys, the
+   invariant verified at width (artifact reproduces its 80.3% lab
+   best exactly through SsmMachine); the full task entered the lab
    (`--task full`: WORDS, doubled keys, demo prefixes as a pure
    superset) — h=128 probe: words 0/20 → 12/20, full-task val 33.3%
    ≥ scoped baseline; and the winning recipe is pinned in the lab

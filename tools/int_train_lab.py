@@ -258,6 +258,24 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   proper (flag-first; measured pace 1.5 s/epoch at width with the
   recipe's ctx 4 - the ~4 h/10k estimate holds; the false start's
   apparent 3.9 s/epoch was the doubled ctx-8 batch, not the machine).
+  THIRTEENTH CAMPAIGN (2026-07-14) - ALIGNMENT PAYS, MEASURED. The
+  aligned 10k h=512 rerun (winning recipe verbatim, 14461 s = 4.0 h)
+  replayed the tenth campaign BIT-EXACTLY end to end: freeze line
+  character for character, ep4600/5000/9999 loss and violations
+  identical to the digit (281996/9 at the end), norms offset by
+  exactly one optimizer step - which is the eval-before-step change
+  displaying earlier, i.e. the alignment fix confirming itself.
+  Predictions three for three: best under the LAWFUL metric 80.3%
+  (vs 81.0 raw / 74.8 post-hoc-lawful on the stale artifact);
+  invariant verified end to end at width - the saved artifact
+  reproduces 80.3% exactly on the val set through SsmMachine; and
+  the CANONICAL GAUNTLET: 65.5% (688/1050), +10 keys over the
+  tenth's 64.6% lower bound. The one-step-stale correction plus
+  per-epoch lawful selection is worth ~1 point for free. NEW
+  INTEGER-TRAINING STATE OF THE ART on common ground (float canon
+  99.3, mint gate 95). Words 1/20 as expected (scoped task) - the
+  remaining gap is DATA, not alignment: full-task h=512 is the
+  named next spend.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
