@@ -478,7 +478,12 @@ conversation. Order is deliberate.
    superset) — h=128 probe: words 0/20 → 12/20, full-task val 33.3%
    ≥ scoped baseline; and the winning recipe is pinned in the lab
    docstring after a defaults-launched rerun silently diverged —
-   flags are provenance.
+   flags are provenance. Fourteenth campaign: full-task 10k at h=512
+   — words wake up (static 21/30, demo 5/5) but the gauntlet pays
+   27 points (38.1%); the run ended unconverged (loss still halving
+   per ~2500 epochs), so interference is not proven — balance probes
+   at h=128, a longer horizon, or in-window anchoring are the
+   candidate next spends.
 
 ## Completed backlog (Tier 2/3 era)
 

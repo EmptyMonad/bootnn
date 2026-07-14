@@ -276,6 +276,29 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   99.3, mint gate 95). Words 1/20 as expected (scoped task) - the
   remaining gap is DATA, not alignment: full-task h=512 is the
   named next spend.
+  FOURTEENTH CAMPAIGN (2026-07-14) - FULL TASK AT WIDTH: WORDS BUY
+  IN, THE COMPOSITE PAYS. 10k full-task h=512 (winning recipe +
+  --task full, 24666 s; 2.5 s/epoch - the 135-row batch costs more
+  than its row ratio). Freeze [3,1,0,0] as at scoped width (floors
+  bind; set-points lawfully differ under the changed warmup).
+  Homeostat held end to end; loss fell 179M -> 8.5M and was STILL
+  falling at ep9999 - the run ended training, not converged.
+  Predictions: stability HIT; words at width: static 21/30 (words
+  11/20, demo 5/5, doubled 5/5) - the h=128 probe's level, no width
+  bonus on words at this budget; gauntlet MISSED: 38.1% (400/1050)
+  vs the scoped artifact's 65.5% - at width and this budget the
+  full task TRADES scoped skill for word skill rather than adding
+  it (h=128 predicted ~2.5 points of cost; width paid 27).
+  Invariant verified again: the artifact reproduces its 53.7% lab
+  best exactly through SsmMachine.
+  Reading: interference NOT proven - this is an unconverged run.
+  The scoped run's leap came in its back half (45.6 -> 80.3 after
+  ep5000); this one hit 53.7 with loss still halving per ~2500
+  epochs at the end. Candidate next spends, cheapest first:
+  (a) h=128 balance probes (static-row weighting, resample cadence)
+  - minutes each; (b) longer horizon at width (20k, ~14 h);
+  (c) parked in-window loss anchoring. Stop-rule: one width run of
+  this shape down.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
