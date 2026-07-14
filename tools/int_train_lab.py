@@ -230,10 +230,47 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   trajectory has not plateaued - a longer horizon is the obvious
   next spend (flag-first; ~40 min per 3000 epochs at this width).
   The >>8 residue hypothesis stays in line behind that.
+  TWELFTH CAMPAIGN (2026-07-14) - FULL TASK OPENS, AND PROVENANCE
+  BITES. Procedural finding first: the aligned 10k rerun was
+  launched from argparse defaults and silently diverged (froze
+  [4,4,0,0] where the tenth's artifact header says [3,1,0,0]) - the
+  winning recipe lived only in a session transcript, nowhere in the
+  repo. Recovered by grepping the transcript archive, ~40 min of
+  compute lost, and the recipe is now pinned below: FLAGS ARE
+  PROVENANCE. The relaunched rerun then reproduced the tenth
+  campaign's ep200 freeze line character for character ([3,1,0,0],
+  OU steps, decay shift, set-point norms) - warmup replay bit-exact,
+  the alignment code proven observational on the real recipe.
+  Scientific finding: gen_data(full=True) extends the lab to the
+  canonical task (doubled keys, WORDS in honest typing order, demo
+  prefixes) as a PURE SUPERSET - the additions are static, consume
+  no rng draws, so every scoped campaign stays bit-reproducible.
+  h=128 probe (winning recipe + --task full, 3000 epochs, 200 s):
+  full-task val best 33.3%, ABOVE the scoped 29.9% baseline despite
+  30 harder rows in the metric; the artifact's static subset jumped
+  9/30 -> 20/30, words 2/20 -> 12/20 (the h=512 canonical-gauntlet
+  artifact scores 0/20 on words). WORDS ARE INTEGER-LEARNABLE and
+  the sequence machinery holds. Cost at this width: canonical
+  gauntlet 19.0% -> 16.5% (both h=128 artifacts sit far below the
+  h=512 artifact's 64.6% - the gauntlet rewards width; h=128 is a
+  directional instrument, not a contender). NEXT: full-task at
+  h=512 once the aligned rerun lands - the 64.6 -> 95 attempt
+  proper (flag-first; measured pace 1.5 s/epoch at width with the
+  recipe's ctx 4 - the ~4 h/10k estimate holds; the false start's
+  apparent 3.9 s/epoch was the doubled ctx-8 batch, not the machine).
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
   python tools/int_train_lab.py --gate                          # CI
+
+THE WINNING RECIPE (pinned here because it once lived only in a session
+transcript and a rerun launched from argparse defaults silently diverged
+- froze [4,4,0,0] instead of [3,1,0,0]; the flags ARE part of the law's
+provenance):
+  h=128 (29.9%):  --epochs 3000 --h 128 --ctx 4 --lr-shift 5 --opt adam
+                  --decay-every 800
+  h=512 (tenth):  --epochs 10000 --h 512 --r1 1024 --r2 384 --ctx 4
+                  --lr-shift 5 --opt adam --decay-every 800 --k1-floor 1
 """
 
 import argparse
@@ -245,7 +282,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from ssm_lab import HISTORY_POOL, SINGLE_KEYS  # noqa: E402
+from ssm_lab import HISTORY_POOL, SINGLE_KEYS, WORDS  # noqa: E402
 from train import CMD, SsmMachine, save_v5  # noqa: E402
 
 F = 24                      # fixed-point fractional bits (Q24)
@@ -288,15 +325,31 @@ class XorShift:
         return self.below(2 * n + 1) - n
 
 
-def gen_data(rng, ctx_per_key=8):
+def gen_data(rng, ctx_per_key=8, full=False):
     """Single-key commands, bare and under random full-alphabet
-    histories (honest typing order) - the scoped probe task."""
+    histories (honest typing order) - the scoped probe task.
+    full=True appends the REST of the canonical task, mirroring
+    ssm_lab.gen_sequences content exactly: doubled keys, WORDS in
+    honest typing order, and the demo's typed prefixes. The
+    additions are static - they consume no rng draws, so the scoped
+    stream (and every prior campaign's trajectory) is untouched."""
     data = [([ord(k)], CMD[cmd]) for k, cmd in SINGLE_KEYS]
     for k, cmd in SINGLE_KEYS:
         for _ in range(ctx_per_key):
             hist = [HISTORY_POOL[rng.below(len(HISTORY_POOL))]
                     for _ in range(1 + rng.below(SEQ_LEN - 1))]
             data.append((hist + [ord(k)], CMD[cmd]))
+    if full:
+        for k in 'bplvc':
+            data.append(([ord(k)] * 2, CMD[dict(SINGLE_KEYS)[k]]))
+        for word, cmd in WORDS:
+            data.append(([ord(c) for c in word], CMD[cmd]))
+        for i, k in enumerate('pboxline'):        # demo, as typed
+            expect = {'p': 'pixel', 'b': 'rect', 'x': 'rect',
+                      'l': 'hline', 'e': 'hline'}.get(k)
+            if expect:
+                data.append(([ord(c) for c in 'pboxline'[:i + 1]],
+                             CMD[expect]))
     return data
 
 
@@ -382,6 +435,7 @@ class IntLab:
         self.kin_floor = 3
         self.k1_floor = 0
         self.save_path = None
+        self.full_task = False
         self.calib = None
         self.trace = 0
         self.churn_servo = False
@@ -652,14 +706,17 @@ class IntLab:
     def train(self, epochs, lr_shift, ctx_per_key=8, seed_data=777,
               resample_every=25, log_every=50, decay_every=0):
         self.lr0 = lr_shift
-        val_X, val_cls = encode(gen_data(XorShift(seed_data + 1), 6))
+        val_X, val_cls = encode(gen_data(XorShift(seed_data + 1), 6,
+                                         full=self.full_task))
         self.calib = val_X
         stream = XorShift(seed_data)
-        X, cls = encode(gen_data(stream, ctx_per_key))
+        X, cls = encode(gen_data(stream, ctx_per_key,
+                                 full=self.full_task))
         best, best_w = -1.0, None
         for ep in range(epochs):
             if ep and ep % resample_every == 0:
-                X, cls = encode(gen_data(stream, ctx_per_key))
+                X, cls = encode(gen_data(stream, ctx_per_key,
+                                         full=self.full_task))
             signs, ks = self.project()
             if self.frozen is None and ep == self.freeze_at:
                 # k_in floor (eighth campaign): the drive-layer k sets
@@ -829,6 +886,11 @@ def main():
     ap.add_argument("--r1", type=int, default=256)
     ap.add_argument("--r2", type=int, default=96)
     ap.add_argument("--ctx", type=int, default=8)
+    ap.add_argument("--task", choices=["scoped", "full"],
+                    default="scoped",
+                    help="scoped = single keys under context (every "
+                         "prior campaign); full = + doubled keys, "
+                         "WORDS, demo prefixes (the canonical task)")
     ap.add_argument("--lr-shift", type=int, default=12,
                     help="learning rate as a right shift of the "
                          "momentum buffer")
@@ -867,6 +929,7 @@ def main():
     lab.kin_floor = args.kin_floor
     lab.k1_floor = args.k1_floor
     lab.save_path = args.save
+    lab.full_task = args.task == "full"
     t0 = time.time()
     best = lab.train(args.epochs, args.lr_shift, ctx_per_key=args.ctx,
                      decay_every=args.decay_every)

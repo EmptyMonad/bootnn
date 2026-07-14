@@ -462,6 +462,20 @@ conversation. Order is deliberate.
    descent, and the 15% width ceiling broke (best 17.0%, monotone).
    Open: 17.0% vs 25.2% at matched epochs with m2 half-recovered —
    the same floor applied to k1 is the measured next refinement.
+   Ninth–twelfth campaigns (2026-07-13/14): the k1 floor completed
+   width recovery (h=512 SOTA 33.3% at 3000 epochs, loss monotone);
+   the 10k run posted **64.6% (678/1050) on the canonical gauntlet**
+   after a one-byte k3 calibration fixed a metric illusion (the lab
+   argmaxed raw logits; the law argmaxes sigmoid outputs);
+   deterministic calibration + eval-before-step made
+   metric == checkpoint == artifact a verified invariant (29.9%
+   exact at h=128, prior artifacts one step stale — 64.6% is a lower
+   bound, aligned rerun in flight); the full task entered the lab
+   (`--task full`: WORDS, doubled keys, demo prefixes as a pure
+   superset) — h=128 probe: words 0/20 → 12/20, full-task val 33.3%
+   ≥ scoped baseline; and the winning recipe is pinned in the lab
+   docstring after a defaults-launched rerun silently diverged —
+   flags are provenance.
 
 ## Completed backlog (Tier 2/3 era)
 
