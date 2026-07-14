@@ -182,7 +182,32 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   (150 -> 187 per mille through the window, above h=128's own ~173;
   units coming alive over time instead of dying) and a new width
   record, 18.4% in the 1001-epoch window.
-  FULL-LENGTH VERDICT (3000 epochs, both floors): WIDTH PAYS.
+  TENTH CAMPAIGN (2026-07-13, long horizon) - THE RATE GAP CLOSES,
+  AND A METRIC ILLUSION FALLS. 10k epochs at h=512 (both floors;
+  interrupted once at ep4600 by a machine shutdown - determinism
+  replayed it bit-exactly, and --save now checkpoints on every new
+  best so interruption costs only time): lab-metric best 81.0%,
+  loss 282k (from 891M in the failure era), violations 9/147. The
+  float control (~60%) is decisively surpassed.
+  THE ILLUSION: the artifact scored 4.8% under the LAW's decision
+  rule. The lab had been argmaxing RAW logits; the kernel argmaxes
+  the piecewise-sigmoid outputs, window (-8192, 8192] - and hinge
+  loss constrains only differences, so the whole logit distribution
+  drifted to ~-531k, UNDER the window: the law output all-zeros,
+  argmax collapsed to class 0. Ranking knowledge was intact (raw
+  argmax 75.5% on the artifact); the scale was lawless.
+  THE ONE-BYTE LAWFUL FIX: k3 is a header shift and arithmetic shift
+  is monotone - k3+7 compresses the distribution into the window
+  with ranking preserved: 74.8% under the law's rule, and 64.6%
+  (678/1050) on the CANONICAL GAUNTLET - the first integer-trained
+  artifact to post a real score on the repo's common ground
+  (canonical float laws: 99.3%; CI gate: 95). accuracy() now applies
+  the law's rule so the lab can never report a lawless number again.
+  NEXT: output-scale calibration at save time (deterministic: pick
+  k3 from the val logit distribution) or a loss term anchoring
+  logits in-window; then the 64.6 -> 95 gap (full task incl. words,
+  longer horizons) - engineering now, not mystery.
+  Prior full-length note (3000 epochs, both floors): WIDTH PAYS.
   Loss monotone 141M -> 58M across the whole run - no divergence, no
   collapse, the homeostat and floors holding end to end - and best
   climbed 17.7 -> 18.4 -> 21.1 -> 27.9 -> 33.3%, STILL RISING at
@@ -574,8 +599,17 @@ class IntLab:
                   flush=True)
 
     def accuracy(self, X, cls, signs, ks):
+        # THE LAW'S decision rule, not the shadow's: the kernel
+        # argmaxes the piecewise-sigmoid OUTPUTS, whose window is
+        # (-8192, 8192] in acc units. Argmaxing raw logits reported
+        # 81% on an artifact whose lawful score was 4.8% - hinge loss
+        # constrains differences only, and the whole logit
+        # distribution had drifted to ~-531k, under the window, so
+        # the law output all-zeros (tenth campaign).
         acc, _ = self.forward(X, signs, ks)
-        return float((acc[:, :N_CMD].argmax(axis=1) == cls).mean())
+        out = np.where(acc < -8192, 0,
+                       np.where(acc > 8192, 32767, (acc + 8192) * 2))
+        return float((out[:, :N_CMD].argmax(axis=1) == cls).mean())
 
     def save(self, path):
         signs, ks = self.project()
