@@ -489,6 +489,12 @@ conversation. Order is deliberate.
    (above the scoped 80.3), still rising at ep19999. The 95 mint
    gate stands 31.5 points away; ctx volume at width, a third
    horizon doubling, and graduation are the candidate next spends.
+   **And the decade-view demo is real (2026-07-15): the 20k
+   integer-trained artifact (0xd28ac8cb) is FAITHFUL on both
+   hardware profiles — trajectory digest 0x6581d2a9 on qemu-tcg-x86
+   and qemu-tcg-riscv32-virt, each equal to the simulator's
+   prediction. An environment-free-trained law, verified law==metal
+   on two ISAs.**
 
 ## Completed backlog (Tier 2/3 era)
 

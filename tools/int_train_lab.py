@@ -329,6 +329,16 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   generalization and the lab trains 4 ctx/key vs the float canon's
   richer stream), a third horizon doubling (40k, ~27 h), or
   graduation work. The 95 mint gate stands 31.5 points away.
+  PORTABILITY (2026-07-15, same day): the 20k artifact (whole-file
+  CRC 0xd28ac8cb) went through the portability harness on BOTH
+  hardware profiles: trajectory digest 0x6581d2a9 on qemu-tcg-x86
+  and on qemu-tcg-riscv32-virt, each equal to the simulator's
+  prediction - FAITHFUL twice. The first INTEGER-TRAINED law
+  verified law==metal on two ISAs: training order-free by
+  construction, inference substrate-free by measurement - the
+  environment-free loop closes end to end. (The 95 gate is the
+  quality bar for TRAINING claims; portability's own verdict is
+  honesty + faithfulness, both met.)
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
