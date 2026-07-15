@@ -339,6 +339,23 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   environment-free loop closes end to end. (The 95 gate is the
   quality bar for TRAINING claims; portability's own verdict is
   honesty + faithfulness, both met.)
+  CTX-VOLUME PROBE (2026-07-15): the discriminator between the next
+  width spends, predictions written first, and the answer is loud.
+  Full-task h=128, ctx 8 (2x context examples per key per
+  resample), 10k epochs (898 s): canonical gauntlet 20.9 -> 45.8%
+  (more than double; prediction said >= 23), static PERFECT 30/30
+  at h=128, val best 42.4 -> 62.1%. CONTEXT VOLUME IS THE GAUNTLET
+  LEVER - the gauntlet is context generalization and the network
+  learns the history distribution exactly as well as it is
+  sampled (the float canon's resampling lesson, re-learned by the
+  integer lab). Per unit cost this beats width: the ctx-8 h=128
+  artifact (11 min) outscores the 10k full-task h=512 artifact
+  (6.9 h) on the gauntlet, 45.8 vs 38.1. The homeostat held on the
+  new shape without retuning (freeze differs from the recipe's -
+  lawful, this is a new warmup). Width proposal that follows: ctx
+  volume AT width (h=512 ctx 8+, ~4 s/epoch) ahead of any further
+  horizon doubling; a ctx-16 h=128 probe runs next to see where
+  the lever saturates.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
