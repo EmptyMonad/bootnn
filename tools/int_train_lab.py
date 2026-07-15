@@ -356,6 +356,17 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   volume AT width (h=512 ctx 8+, ~4 s/epoch) ahead of any further
   horizon doubling; a ctx-16 h=128 probe runs next to see where
   the lever saturates.
+  CTX-16 PROBE (2026-07-15, same day): the lever keeps paying on
+  the gauntlet (45.8 -> 53.1%) but h=128 RUNS OUT OF CAPACITY: the
+  static rows dilute to 8% of the batch and words fall 20/20 ->
+  13/20, while val best plateaus at exactly 62.1% - the ctx-8
+  number. At narrow width, ctx 16 is a TRADE (context skill for
+  word skill), not a win. The composite ceiling moved from "not
+  enough context data" to "not enough network". Width owns the
+  next move: h=512 ctx 8 full-task is the measured buy (one lever
+  at a time - volume isolated at width; h=512 held words 20/20
+  with margin at ctx 4, and its val was still rising when the 20k
+  run ended).
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
