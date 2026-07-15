@@ -309,6 +309,26 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   full-task h=512; determinism makes its first 10k a free bit-exact
   replay of the fourteenth run, so the spend is +10k new epochs,
   ~13.7 h wall).
+  FIFTEENTH CAMPAIGN (2026-07-15) - THE BACK HALF PAYS AT WIDTH;
+  THE FULL TASK'S CORE IS PERFECT. 20k full-task h=512 (fourteenth
+  verbatim + --epochs 20000, 52691 s): the first 10k epochs
+  replayed the fourteenth campaign bit-exactly (ep5000/9900/9950
+  loss+violations to the digit), then the back half delivered the
+  h=128 pattern at width: val best 53.7 -> 84.7% (ABOVE the scoped
+  run's 80.3), loss 8.5M -> 556k, still improving at ep19999.
+  The artifact: STATIC SUBSET 30/30 - words 20/20, doubled 5/5,
+  demo 5/5, the first integer-trained artifact to fully learn the
+  canonical task's core - and canonical gauntlet 63.5% (667/1050),
+  up 25 points from the fourteenth artifact and within 2 of the
+  scoped 65.5% while knowing everything the scoped artifact does
+  not. Invariant verified: 84.7% exact through SsmMachine. Reading:
+  horizon closed the trade almost completely and had not plateaued;
+  the remaining gauntlet gap to the scoped artifact is 2 points
+  against a +47-point static gain. Next levers, cheapest-informative
+  first: ctx volume at width (the gauntlet is context
+  generalization and the lab trains 4 ctx/key vs the float canon's
+  richer stream), a third horizon doubling (40k, ~27 h), or
+  graduation work. The 95 mint gate stands 31.5 points away.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4

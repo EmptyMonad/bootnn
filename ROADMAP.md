@@ -480,10 +480,15 @@ conversation. Order is deliberate.
    docstring after a defaults-launched rerun silently diverged —
    flags are provenance. Fourteenth campaign: full-task 10k at h=512
    — words wake up (static 21/30, demo 5/5) but the gauntlet pays
-   27 points (38.1%); the run ended unconverged (loss still halving
-   per ~2500 epochs), so interference is not proven — balance probes
-   at h=128, a longer horizon, or in-window anchoring are the
-   candidate next spends.
+   27 points (38.1%); the run ended unconverged, and the h=128 horizon
+   probe confirmed unconverged over interference. Fifteenth campaign
+   (20k full-task h=512, first half a bit-exact replay of the
+   fourteenth): **static core PERFECT — words 20/20, doubled 5/5,
+   demo 5/5 — and canonical gauntlet 63.5%**, within 2 points of the
+   scoped artifact while knowing the whole task; val best 84.7%
+   (above the scoped 80.3), still rising at ep19999. The 95 mint
+   gate stands 31.5 points away; ctx volume at width, a third
+   horizon doubling, and graduation are the candidate next spends.
 
 ## Completed backlog (Tier 2/3 era)
 
