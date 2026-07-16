@@ -367,6 +367,27 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   at a time - volume isolated at width; h=512 held words 20/20
   with margin at ctx 4, and its val was still rising when the 20k
   run ended).
+  SIXTEENTH CAMPAIGN (2026-07-16) - CTX 8 AT WIDTH: PREDICTION
+  MISSED, MECHANISM READ FROM THE LOG. 10k full-task h=512 ctx 8
+  (12.2 h): lab best 49.2%, gauntlet 37.9%, static 21/30 - far
+  under the >63.5% prediction. The log explains it: the doubled
+  ctx volume drives L0's warmup 4x hotter (set-point froze at 1562
+  vs 393; by ep1000 the live norm hit 2387, 53% OVER it), and the
+  OU thermostat spent ~5000 epochs dragging the layer back while
+  loss ROSE 113M -> 386M; only after norms settled did the healthy
+  regime begin - loss 386M -> 43M and best accelerating 36.7 ->
+  49.2 through the final 3000 epochs. The run got ~4000 healthy
+  epochs, not 10k. Same lesson as the fourteenth campaign wearing
+  a new coat: at width, every added difficulty (task, then data
+  volume) shifts the trajectory right - predictions from h=128 at
+  MATCHED EPOCHS overestimate width every time (twice now; write
+  it down). The late slope mirrors the ctx-4 run's mid-phase,
+  which delivered 53.7 -> 84.7 in its back half. Candidate spends:
+  20k ctx-8 (first 10k replays free - the measured continuation),
+  or a later freeze (--freeze 400+) to stop locking set-points
+  mid-inflation on hot-warmup shapes (new shape, breaks replay;
+  probe value at h=128 is nil because narrow ctx-8 warmup is not
+  hot). Stop-rule: one run of this shape down.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
