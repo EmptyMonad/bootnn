@@ -388,6 +388,34 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   mid-inflation on hot-warmup shapes (new shape, breaks replay;
   probe value at h=128 is nil because narrow ctx-8 warmup is not
   hot). Stop-rule: one run of this shape down.
+  SEVENTEENTH CAMPAIGN (2026-07-17) - THE LEVER DOES NOT TRANSFER;
+  A CEILING NAMED. 20k full-task h=512 ctx 8 (killed once at ep400
+  by a Windows Update reboot - replayed bit-exact from seed;
+  ep5000/9500 matched the sixteenth run to the digit). The back
+  half recovered exactly as predicted (best 49.2 -> 62.1 -> 85.3),
+  invariant verified exact through SsmMachine, static PERFECT
+  30/30. BUT the whole point of the run - that doubled context data
+  converts to gauntlet points at width - is FALSIFIED: gauntlet
+  64.7% (679/1050) vs the ctx-4 20k champion's 63.5%. +1.2 points
+  for 2x the context data and ~23 h. The h=128 ctx doubling bought
+  +25 (20.9 -> 45.8); at width it bought +1.2. READING: the +25 at
+  h=128 was recovery from DATA STARVATION that width does not
+  suffer - width already extracts nearly all the context
+  generalization available in ctx-4, so more context data is
+  redundant, not additive. Both width levers are now measured as
+  exhausted: horizon (fifteenth: 63.5 at 20k, the plateau) and
+  volume (this run: +1.2). The integer trainer's ceiling on the
+  gauntlet sits ~64-65% while the FLOAT canon gets 99.3% on the
+  identical eval - and the static core is perfect, so the entire
+  35-point gap is single-key CONTEXT ROBUSTNESS. The 64.7 -> 95
+  gap is NOT an epochs/data problem; it is a capability gap between
+  the integer optimizer and float BPTT on context generalization,
+  and closing it needs a new idea (parked: in-window loss
+  anchoring; >>8 residue; or a direct measurement of WHICH
+  histories the integer law misses that the float law gets), not
+  another run of an exhausted shape. STOP-RULE HIT: two width runs
+  (horizon, volume) both plateau near 64%. weights_int512_ctx8_20k
+  (gauntlet 64.7, static 30/30) is the standing integer champion.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4

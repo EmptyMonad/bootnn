@@ -494,7 +494,19 @@ conversation. Order is deliberate.
    hardware profiles — trajectory digest 0x6581d2a9 on qemu-tcg-x86
    and qemu-tcg-riscv32-virt, each equal to the simulator's
    prediction. An environment-free-trained law, verified law==metal
-   on two ISAs.**
+   on two ISAs.** Sixteenth/seventeenth campaigns then measured the
+   two width levers to exhaustion: ctx-volume doubling paid +25
+   points at h=128 (data starvation) but only +1.2 at width
+   (63.5→64.7% gauntlet, static a perfect 30/30, val 85.3%) — width
+   already extracts the context generalization that narrow width
+   lacks. The standing integer champion is `weights_int512_ctx8_20k`
+   at **64.7% gauntlet, 30/30 static**. The remaining 64.7→95 gap is
+   entirely single-key context robustness (the float canon gets
+   99.3% on the same eval with a perfect static core too), so it is
+   a capability gap between the integer optimizer and float BPTT —
+   NOT an epochs/data problem. Next work is a new idea (in-window
+   loss anchoring; a direct measurement of which held-out histories
+   the integer law misses that float gets), not another width run.
 
 ## Completed backlog (Tier 2/3 era)
 
