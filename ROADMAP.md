@@ -504,9 +504,18 @@ conversation. Order is deliberate.
    entirely single-key context robustness (the float canon gets
    99.3% on the same eval with a perfect static core too), so it is
    a capability gap between the integer optimizer and float BPTT —
-   NOT an epochs/data problem. Next work is a new idea (in-window
-   loss anchoring; a direct measurement of which held-out histories
-   the integer law misses that float gets), not another width run.
+   NOT an epochs/data problem. Next work is a new idea, not another width run — and
+   the miss-diagnostic (2026-07-17) named it: the gap is one
+   mechanism, **recency over long history**. Integer error climbs
+   monotone with history length (0% at length 0, 42% past length 41)
+   while float holds; the trigger key's drive is quantized away
+   against a large accumulated int16 `h`, collapsing the readout
+   toward defaults (pixel→nop). Float solves it with the identical
+   architecture, so it is an optimizer/precision gap in the
+   recurrence's dynamic range. The retargeted lever is trigger-signal
+   preservation (weight long-history examples; measure trigger-tick
+   `h` magnitude float-vs-int; revisit drive scale) — epochs, width,
+   and context volume are all measured exhausted.
 
 ## Completed backlog (Tier 2/3 era)
 

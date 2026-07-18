@@ -416,6 +416,28 @@ FINDINGS (2026-07-12, first campaign - the honest ledger):
   another run of an exhausted shape. STOP-RULE HIT: two width runs
   (horizon, volume) both plateau near 64%. weights_int512_ctx8_20k
   (gauntlet 64.7, static 30/30) is the standing integer champion.
+  MISS-DIAGNOSTIC (2026-07-17, read-only, champion vs float canon on
+  the identical 1050 seeded gauntlet cases): the gap is ONE
+  mechanism - RECENCY OVER LONG HISTORY. Of 364 float-right/int-
+  wrong cases, only 7 are both-wrong (the task-hard floor is ~0; the
+  whole 35-pt gap is integer-specific). Error rate climbs MONOTONE
+  with history length: len0 0/14 (perfect - the static core),
+  len1-4 22%, len5-16 24%, len17-40 38%, len41+ 42%. OOV history
+  content is NOT the driver (int-wrong 0.34 OOV-fraction vs
+  int-right 0.33 - identical). The confusions collapse toward the
+  low-index defaults - pixel->nop x42, hline->nop x22, ->pixel
+  throughout: after a long history the trigger key's single drive
+  term (>>k_in) is too weak against the accumulated int16 h, so the
+  readout reflects the decayed history soup, not the trigger. Float
+  BPTT solves this to 99.3% with the SAME architecture and SAME
+  decay spectrum, so it is an optimizer/precision gap in the
+  recurrence's dynamic range, not an architectural limit. This
+  RETARGETS the parked work: the lever is trigger-signal
+  preservation against a large accumulator (candidates, cheap-first:
+  weight long-history examples in the hinge; measure h-magnitude at
+  the trigger tick float-vs-int; revisit k_in/drive scale for long
+  contexts), NOT more epochs, width, or context volume - all three
+  measured exhausted.
 
 Probes:
   python tools/int_train_lab.py --epochs 400 --h 128 --ctx 4
